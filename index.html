@@ -70,7 +70,7 @@ function stopCamera(){
  $('video').srcObject=null
 }
 async function detect(){
- return await faceapi.detectSingleFace($('video'),new faceapi.TinyFaceDetectorOptions({inputSize:224,scoreThreshold:.55})).withFaceLandmarks(true).withFaceDescriptor()
+ return await faceapi.detectSingleFace($('video'),new faceapi.TinyFaceDetectorOptions({inputSize:320,scoreThreshold:.45})).withFaceLandmarks(true).withFaceDescriptor()
 }
 function ear(p){
  function r(i){let a=p[i[0]],b=p[i[1]],c=p[i[2]],d=p[i[3]],e=p[i[4]],f=p[i[5]];let x=Math.hypot(b.x-f.x,b.y-f.y),y=Math.hypot(c.x-e.x,c.y-e.y),z=Math.hypot(a.x-d.x,a.y-d.y);return z?(x+y)/(2*z):0}
@@ -82,24 +82,96 @@ function yaw(p){
  return (nose.x-(lx+rx)/2)/(Math.abs(rx-lx)||1)
 }
 async function liveness(){
+ // Liveness V3.3: lebih toleran terhadap pencahayaan, gerakan kecil,
+ // frame drop, dan variasi bentuk mata. Challenge tetap acak.
  const challenges=['BLINK','TURN_RIGHT','TURN_LEFT'];
  const c=challenges[Math.floor(Math.random()*challenges.length)];
  const text={BLINK:'Kedipkan mata sekali',TURN_RIGHT:'Toleh perlahan ke kanan',TURN_LEFT:'Toleh perlahan ke kiri'}[c];
- msg(text);detail('Liveness challenge sedang berlangsung.');progress(5);
- let base=null,prev=null,armed=true,start=Date.now();
- while(Date.now()-start<12000){
-  let r=await detect();
-  if(r){
-   let p=r.landmarks.positions,e=ear(p),y=yaw(p);
-   if(base===null)base=y;
-   if(c==='BLINK'&&prev!==null){if(armed&&prev>.20&&e<.16)armed=false;if(!armed&&e>.20){progress(35);return {passed:true,score:95,challenge:c}}}
-   if(c==='TURN_RIGHT'&&y-base>.12){progress(35);return {passed:true,score:90,challenge:c}}
-   if(c==='TURN_LEFT'&&y-base<-.12){progress(35);return {passed:true,score:90,challenge:c}}
-   prev=e
-  }
-  await new Promise(r=>setTimeout(r,160))
+ msg(text);detail('Kalibrasi wajah... lihat kamera dan tunggu sebentar.');progress(5);
+
+ const start=Date.now();
+ const maxMs=18000;
+ let baseYaw=null;
+ let yawSamples=[];
+ let eyeBaselineSamples=[];
+ let eyeBase=null;
+ let closed=false;
+ let stableFrames=0;
+ let lastDetection=0;
+
+ // Ambil baseline selama ~1 detik. Ini jauh lebih stabil daripada
+ // memakai angka EAR absolut yang sama untuk semua bentuk mata.
+ while(Date.now()-start<3000){
+   const r=await detect();
+   if(r){
+     const p=r.landmarks.positions;
+     const e=ear(p), y=yaw(p);
+     if(e>0 && e<1){ eyeBaselineSamples.push(e); }
+     yawSamples.push(y);
+     stableFrames++;
+     if(eyeBaselineSamples.length>=5 && yawSamples.length>=5) break;
+   }
+   await new Promise(r=>setTimeout(r,90));
  }
- return {passed:false,score:0,challenge:c}
+
+ if(stableFrames<3){
+   return {passed:false,score:0,challenge:c,reason:'FACE_NOT_STABLE'};
+ }
+
+ const median=a=>{a=a.slice().sort((x,y)=>x-y);return a[Math.floor(a.length/2)]};
+ eyeBase=eyeBaselineSamples.length?median(eyeBaselineSamples):0.26;
+ baseYaw=median(yawSamples);
+
+ // EAR threshold adaptif. Contoh baseline 0.28 -> close ~0.20,
+ // recovery ~0.25. Batas bawah mencegah threshold terlalu rendah.
+ const closeThreshold=Math.max(0.14,eyeBase*0.72);
+ const openThreshold=Math.max(0.18,eyeBase*0.86);
+
+ detail(c==='BLINK'
+   ? 'Kedipkan mata sekali. Sistem akan membaca beberapa frame.'
+   : 'Gerakkan kepala perlahan sesuai arah yang diminta.');
+
+ while(Date.now()-start<maxMs){
+   const now=Date.now();
+   if(now-lastDetection<70){ await new Promise(r=>setTimeout(r,25)); continue; }
+   lastDetection=now;
+
+   const r=await detect();
+   if(!r){
+     msg(text);
+     await new Promise(r=>setTimeout(r,70));
+     continue;
+   }
+
+   const p=r.landmarks.positions;
+   const e=ear(p), y=yaw(p);
+
+   if(c==='BLINK'){
+     // Perlu ada mata terbuka -> tertutup -> terbuka lagi.
+     if(!closed && e<closeThreshold){
+       closed=true;
+       progress(45);
+     } else if(closed && e>openThreshold){
+       progress(65);
+       return {passed:true,score:97,challenge:c,baselineEAR:eyeBase};
+     }
+   } else {
+     const delta=y-baseYaw;
+     // Toleransi lebih longgar: ±0.07–0.08 cukup untuk toleh perlahan.
+     const threshold=0.075;
+     if(c==='TURN_RIGHT' && delta>threshold){
+       progress(65);
+       return {passed:true,score:94,challenge:c,baselineYaw:baseYaw};
+     }
+     if(c==='TURN_LEFT' && delta<-threshold){
+       progress(65);
+       return {passed:true,score:94,challenge:c,baselineYaw:baseYaw};
+     }
+   }
+
+   await new Promise(r=>setTimeout(r,75));
+ }
+ return {passed:false,score:0,challenge:c,reason:'TIMEOUT'};
 }
 function dist(a,b){if(!a||!b||a.length!==128||b.length!==128)return Infinity;let s=0;for(let i=0;i<128;i++){let d=Number(a[i])-Number(b[i]);s+=d*d}return Math.sqrt(s)}
 function score(d,t){return Math.max(0,Math.min(100,100-(d/(Number(t)||.52))*50))}
@@ -132,7 +204,7 @@ function fail(reason,text){msg(text);detail('Proses dihentikan.');send('FACE_ERR
 async function begin(cfg){
  FACE.cfg=cfg||{};FACE.parentOrigin=cfg.parentOrigin||window.location.origin;
  $('mode').textContent=cfg.mode==='enroll'?'Pendaftaran wajah':'Verifikasi absensi';
- try{await openCamera();msg('Kamera aktif.');detail('Menyiapkan AI...');if(cfg.mode==='enroll')await enroll();else await verify()}
+ try{await openCamera();msg('Kamera aktif.');detail('Menyiapkan AI dan kalibrasi wajah...');if(cfg.mode==='enroll')await enroll();else await verify()}
  catch(e){console.error(e);let m=e.name==='NotAllowedError'?'Izin kamera diblokir oleh browser/host.':e.name==='NotFoundError'?'Kamera tidak ditemukan.':e.name==='NotReadableError'?'Kamera sedang dipakai aplikasi lain.':(e.message||String(e));fail('CAMERA',m)}
 }
 window.addEventListener('message',e=>{
@@ -142,7 +214,7 @@ window.addEventListener('message',e=>{
  if(e.data.type==='INIT_FACE')begin(e.data.config||{})
 });
 $('cancel').onclick=()=>{send('CANCEL',{nonce:FACE.cfg?.nonce});stopCamera();window.close()}
-$('retry').onclick=()=>{if(FACE.cfg)begin(FACE.cfg)}
+$('retry').onclick=()=>{if(FACE.cfg){$('retry').style.display='none';stopCamera();begin(FACE.cfg)}}
 // Request initialization explicitly after opening.
 setTimeout(()=>send('READY',{}),100);
 </script>
