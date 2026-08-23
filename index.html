@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Face Security Camera</title>
+<script src="https://cdn.jsdelivr.net/npm/@vladmandic/face-api/dist/face-api.js"></script>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#070916;color:#fff;font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;min-height:100vh;display:grid;place-items:center}
+.card{width:min(94vw,520px);padding:18px;border-radius:28px;background:#111426;box-shadow:0 25px 80px #0008}.head{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}.title{font-weight:900;font-size:18px}.badge{font-size:10px;font-weight:900;background:#252a40;border-radius:999px;padding:7px 10px}
+.stage{position:relative;aspect-ratio:4/3;background:#02030c;border-radius:24px;overflow:hidden}.stage video{width:100%;height:100%;object-fit:cover;transform:scaleX(-1)}.oval{position:absolute;left:50%;top:50%;width:58%;height:78%;transform:translate(-50%,-50%);border:2px solid #ffffffaa;border-radius:50%;box-shadow:0 0 0 999px #0003}.msg{position:absolute;left:14px;right:14px;bottom:14px;background:#000b;border-radius:15px;padding:12px;text-align:center;font-size:12px;font-weight:800}.progress{height:6px;background:#282c40;border-radius:99px;overflow:hidden;margin-top:14px}.bar{height:100%;width:0;background:#5b55ff;transition:width .25s}.small{font-size:10px;color:#aeb3c8;margin-top:10px;line-height:1.5}.actions{display:flex;gap:10px;margin-top:14px}.btn{flex:1;border:0;border-radius:14px;padding:13px;font-weight:900;cursor:pointer}.primary{background:#5147e8;color:#fff}.secondary{background:#24283a;color:#dce0ee}
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="head">
+    <div><div class="title">Registrasi / Verifikasi Wajah</div><div id="mode" class="small">Menghubungkan...</div></div>
+    <div id="badge" class="badge">CAMERA</div>
+  </div>
+  <div class="stage">
+    <video id="video" autoplay muted playsinline></video>
+    <div class="oval"></div>
+    <div id="msg" class="msg">Menunggu perintah dari aplikasi...</div>
+  </div>
+  <div class="progress"><div id="bar" class="bar"></div></div>
+  <div id="detail" class="small">Kamera akan digunakan hanya selama proses verifikasi.</div>
+  <div class="actions">
+    <button class="btn secondary" id="cancel">Tutup</button>
+    <button class="btn primary" id="retry" style="display:none">Coba Lagi</button>
+  </div>
+</div>
+<script>
+const FACE={
+ model:'https://cdn.jsdelivr.net/gh/vladmandic/face-api@master/model',
+ fallback:'https://raw.githubusercontent.com/vladmandic/face-api/master/model',
+ loaded:false, stream:null, parentOrigin:null, cfg:null
+};
+const $=id=>document.getElementById(id);
+function msg(t){$('msg').textContent=t}
+function detail(t){$('detail').textContent=t}
+function badge(t){$('badge').textContent=t}
+function progress(n){$('bar').style.width=Math.max(0,Math.min(100,n))+'%'}
+function send(type,payload){
+ if(!window.opener) return;
+ window.opener.postMessage({source:'FACE_SECURITY_V32',type,...payload},FACE.parentOrigin||'*');
+}
+async function models(base){
+ await Promise.all([
+  faceapi.nets.tinyFaceDetector.loadFromUri(base),
+  faceapi.nets.faceLandmark68TinyNet.loadFromUri(base),
+  faceapi.nets.faceRecognitionNet.loadFromUri(base)
+ ]);
+}
+async function loadEngine(){
+ if(FACE.loaded)return true;
+ badge('AI LOAD');msg('Memuat mesin Face Recognition...');
+ try{
+  try{await faceapi.tf.setBackend('webgl');await faceapi.tf.ready()}catch(e){await faceapi.tf.setBackend('cpu');await faceapi.tf.ready()}
+  try{await models(FACE.model)}catch(e){await models(FACE.fallback)}
+  FACE.loaded=true;badge('AI READY');return true
+ }catch(e){badge('AI ERROR');msg('Mesin AI gagal dimuat.');detail(e.message||String(e));return false}
+}
+async function openCamera(){
+ if(!navigator.mediaDevices?.getUserMedia)throw new Error('Browser tidak menyediakan getUserMedia.');
+ FACE.stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'user'},width:{ideal:720},height:{ideal:540}},audio:false});
+ $('video').srcObject=FACE.stream;await $('video').play();badge('CAMERA OK')
+}
+function stopCamera(){
+ if(FACE.stream){FACE.stream.getTracks().forEach(t=>t.stop());FACE.stream=null}
+ $('video').srcObject=null
+}
+async function detect(){
+ return await faceapi.detectSingleFace($('video'),new faceapi.TinyFaceDetectorOptions({inputSize:224,scoreThreshold:.55})).withFaceLandmarks(true).withFaceDescriptor()
+}
+function ear(p){
+ function r(i){let a=p[i[0]],b=p[i[1]],c=p[i[2]],d=p[i[3]],e=p[i[4]],f=p[i[5]];let x=Math.hypot(b.x-f.x,b.y-f.y),y=Math.hypot(c.x-e.x,c.y-e.y),z=Math.hypot(a.x-d.x,a.y-d.y);return z?(x+y)/(2*z):0}
+ return (r([36,37,38,39,40,41])+r([42,43,44,45,46,47]))/2
+}
+function yaw(p){
+ let le=p.slice(36,42),re=p.slice(42,48),nose=p[30];
+ let lx=le.reduce((s,x)=>s+x.x,0)/le.length,rx=re.reduce((s,x)=>s+x.x,0)/re.length;
+ return (nose.x-(lx+rx)/2)/(Math.abs(rx-lx)||1)
+}
+async function liveness(){
+ const challenges=['BLINK','TURN_RIGHT','TURN_LEFT'];
+ const c=challenges[Math.floor(Math.random()*challenges.length)];
+ const text={BLINK:'Kedipkan mata sekali',TURN_RIGHT:'Toleh perlahan ke kanan',TURN_LEFT:'Toleh perlahan ke kiri'}[c];
+ msg(text);detail('Liveness challenge sedang berlangsung.');progress(5);
+ let base=null,prev=null,armed=true,start=Date.now();
+ while(Date.now()-start<12000){
+  let r=await detect();
+  if(r){
+   let p=r.landmarks.positions,e=ear(p),y=yaw(p);
+   if(base===null)base=y;
+   if(c==='BLINK'&&prev!==null){if(armed&&prev>.20&&e<.16)armed=false;if(!armed&&e>.20){progress(35);return {passed:true,score:95,challenge:c}}}
+   if(c==='TURN_RIGHT'&&y-base>.12){progress(35);return {passed:true,score:90,challenge:c}}
+   if(c==='TURN_LEFT'&&y-base<-.12){progress(35);return {passed:true,score:90,challenge:c}}
+   prev=e
+  }
+  await new Promise(r=>setTimeout(r,160))
+ }
+ return {passed:false,score:0,challenge:c}
+}
+function dist(a,b){if(!a||!b||a.length!==128||b.length!==128)return Infinity;let s=0;for(let i=0;i<128;i++){let d=Number(a[i])-Number(b[i]);s+=d*d}return Math.sqrt(s)}
+function score(d,t){return Math.max(0,Math.min(100,100-(d/(Number(t)||.52))*50))}
+async function enroll(){
+ const ok=await loadEngine();if(!ok)return fail('AI_ENGINE','Mesin AI gagal dimuat.');
+ const live=await liveness();if(!live.passed)return fail('LIVENESS','Liveness gagal. Silakan ulangi.');
+ let samples=[];
+ for(let i=0;i<5;i++){
+  msg('Ambil sampel wajah '+(i+1)+'/5');progress(40+i*10);
+  let r=await detect();
+  if(!r){i--;await new Promise(r=>setTimeout(r,350));continue}
+  samples.push(Array.from(r.descriptor));await new Promise(r=>setTimeout(r,350))
+ }
+ progress(95);msg('Registrasi wajah selesai.');
+ send('ENROLL_RESULT',{nonce:FACE.cfg.nonce,success:true,liveness:true,livenessScore:live.score,samples});
+ stopCamera();detail('Hasil dikirim kembali ke aplikasi.');progress(100)
+}
+async function verify(){
+ const ok=await loadEngine();if(!ok)return fail('AI_ENGINE','Mesin AI gagal dimuat.');
+ const live=await liveness();if(!live.passed)return fail('LIVENESS','Liveness gagal.');
+ msg('Mencocokkan wajah...');progress(55);
+ const r=await detect();if(!r)return fail('NO_FACE','Wajah tidak terdeteksi.');
+ const d=dist(Array.from(r.descriptor),FACE.cfg.descriptor),s=score(d,FACE.cfg.threshold);
+ const passed=d<=(FACE.cfg.threshold||.52);
+ progress(90);msg(passed?'✓ Wajah cocok':'✕ Wajah tidak cocok');
+ send('VERIFY_RESULT',{nonce:FACE.cfg.nonce,success:true,faceVerified:passed,faceScore:Math.round(s*10)/10,distance:Math.round(d*1000)/1000,threshold:FACE.cfg.threshold||.52,liveness:true,livenessScore:live.score});
+ stopCamera();progress(100)
+}
+function fail(reason,text){msg(text);detail('Proses dihentikan.');send('FACE_ERROR',{nonce:FACE.cfg?.nonce,reason,message:text});$('retry').style.display='block'}
+async function begin(cfg){
+ FACE.cfg=cfg||{};FACE.parentOrigin=cfg.parentOrigin||window.location.origin;
+ $('mode').textContent=cfg.mode==='enroll'?'Pendaftaran wajah':'Verifikasi absensi';
+ try{await openCamera();msg('Kamera aktif.');detail('Menyiapkan AI...');if(cfg.mode==='enroll')await enroll();else await verify()}
+ catch(e){console.error(e);let m=e.name==='NotAllowedError'?'Izin kamera diblokir oleh browser/host.':e.name==='NotFoundError'?'Kamera tidak ditemukan.':e.name==='NotReadableError'?'Kamera sedang dipakai aplikasi lain.':(e.message||String(e));fail('CAMERA',m)}
+}
+window.addEventListener('message',e=>{
+ if(!window.opener||e.source!==window.opener)return;
+ if(e.data?.source!=='ABSENSI_APP_V32')return;
+ if(!FACE.parentOrigin)FACE.parentOrigin=e.origin;
+ if(e.data.type==='INIT_FACE')begin(e.data.config||{})
+});
+$('cancel').onclick=()=>{send('CANCEL',{nonce:FACE.cfg?.nonce});stopCamera();window.close()}
+$('retry').onclick=()=>{if(FACE.cfg)begin(FACE.cfg)}
+// Request initialization explicitly after opening.
+setTimeout(()=>send('READY',{}),100);
+</script>
+</body>
+</html>
