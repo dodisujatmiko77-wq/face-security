@@ -285,7 +285,7 @@ async function verify(){
  });
  stopCamera();progress(100)
 }
-function fail(function fail(reason,text){msg(text);detail('Proses dihentikan.');send('FACE_ERROR',{nonce:FACE.cfg?.nonce,reason,message:text});$('retry').style.display='block'}
+function fail(reason,text){msg(text);detail('Proses dihentikan.');send('FACE_ERROR',{nonce:FACE.cfg?.nonce,reason,message:text});$('retry').style.display='block'}
 async function begin(cfg){
  FACE.cfg=cfg||{};FACE.parentOrigin=cfg.parentOrigin||window.location.origin;
  $('mode').textContent=cfg.mode==='enroll'?'Pendaftaran wajah':'Verifikasi absensi';
