@@ -69,8 +69,19 @@ function stopCamera(){
  if(FACE.stream){FACE.stream.getTracks().forEach(t=>t.stop());FACE.stream=null}
  $('video').srcObject=null
 }
-async function detect(){
- return await faceapi.detectSingleFace($('video'),new faceapi.TinyFaceDetectorOptions({inputSize:320,scoreThreshold:.45})).withFaceLandmarks(true).withFaceDescriptor()
+// Untuk liveness kita TIDAK menghitung descriptor setiap frame.
+// Descriptor hanya dihitung setelah liveness lolos. Ini membuat deteksi
+// kedip/toleh jauh lebih ringan dan responsif.
+async function detectLandmarks(){
+ return await faceapi
+  .detectSingleFace($('video'),new faceapi.TinyFaceDetectorOptions({inputSize:224,scoreThreshold:.40}))
+  .withFaceLandmarks(true)
+}
+async function detectDescriptor(){
+ return await faceapi
+  .detectSingleFace($('video'),new faceapi.TinyFaceDetectorOptions({inputSize:224,scoreThreshold:.40}))
+  .withFaceLandmarks(true)
+  .withFaceDescriptor()
 }
 function ear(p){
  function r(i){let a=p[i[0]],b=p[i[1]],c=p[i[2]],d=p[i[3]],e=p[i[4]],f=p[i[5]];let x=Math.hypot(b.x-f.x,b.y-f.y),y=Math.hypot(c.x-e.x,c.y-e.y),z=Math.hypot(a.x-d.x,a.y-d.y);return z?(x+y)/(2*z):0}
@@ -82,97 +93,138 @@ function yaw(p){
  return (nose.x-(lx+rx)/2)/(Math.abs(rx-lx)||1)
 }
 async function liveness(){
- // Liveness V3.3: lebih toleran terhadap pencahayaan, gerakan kecil,
- // frame drop, dan variasi bentuk mata. Challenge tetap acak.
+ // V3.4: liveness dibuat lebih cepat dengan detector ringan.
+ // Descriptor 128D TIDAK dihitung selama liveness; hanya landmark wajah.
  const challenges=['BLINK','TURN_RIGHT','TURN_LEFT'];
  const c=challenges[Math.floor(Math.random()*challenges.length)];
- const text={BLINK:'Kedipkan mata sekali',TURN_RIGHT:'Toleh perlahan ke kanan',TURN_LEFT:'Toleh perlahan ke kiri'}[c];
- msg(text);detail('Kalibrasi wajah... lihat kamera dan tunggu sebentar.');progress(5);
+ const text={
+  BLINK:'Kedipkan mata sekali',
+  TURN_RIGHT:'Toleh perlahan ke kanan',
+  TURN_LEFT:'Toleh perlahan ke kiri'
+ }[c];
 
- const start=Date.now();
- const maxMs=18000;
- let baseYaw=null;
+ msg(text);
+ detail('Mencari wajah... lihat kamera dari jarak normal.');
+ progress(5);
+
+ const started=Date.now();
+ const maxMs=9000;
+
+ // Kalibrasi singkat: cukup 3 frame wajah yang stabil.
  let yawSamples=[];
- let eyeBaselineSamples=[];
- let eyeBase=null;
- let closed=false;
- let stableFrames=0;
- let lastDetection=0;
+ let eyeSamples=[];
+ let attempts=0;
 
- // Ambil baseline selama ~1 detik. Ini jauh lebih stabil daripada
- // memakai angka EAR absolut yang sama untuk semua bentuk mata.
- while(Date.now()-start<3000){
-   const r=await detect();
-   if(r){
-     const p=r.landmarks.positions;
-     const e=ear(p), y=yaw(p);
-     if(e>0 && e<1){ eyeBaselineSamples.push(e); }
-     yawSamples.push(y);
-     stableFrames++;
-     if(eyeBaselineSamples.length>=5 && yawSamples.length>=5) break;
-   }
-   await new Promise(r=>setTimeout(r,90));
+ while(Date.now()-started<1800 && (yawSamples.length<3 || eyeSamples.length<3)){
+  attempts++;
+  const r=await detectLandmarks();
+
+  if(r){
+   const p=r.landmarks.positions;
+   const e=ear(p);
+   const y=yaw(p);
+
+   if(Number.isFinite(e) && e>0.10 && e<0.60) eyeSamples.push(e);
+   if(Number.isFinite(y)) yawSamples.push(y);
+
+   progress(Math.min(25,8+Math.round((Math.min(yawSamples.length,3)/3)*17)));
+   if(yawSamples.length>=3 && eyeSamples.length>=3) break;
+  }
+
+  await new Promise(r=>setTimeout(r,90));
  }
 
- if(stableFrames<3){
-   return {passed:false,score:0,challenge:c,reason:'FACE_NOT_STABLE'};
+ if(yawSamples.length<2 || eyeSamples.length<2){
+  return {passed:false,score:0,challenge:c,reason:'FACE_NOT_STABLE'};
  }
 
- const median=a=>{a=a.slice().sort((x,y)=>x-y);return a[Math.floor(a.length/2)]};
- eyeBase=eyeBaselineSamples.length?median(eyeBaselineSamples):0.26;
- baseYaw=median(yawSamples);
+ const median=a=>{
+  a=a.slice().sort((x,y)=>x-y);
+  return a[Math.floor(a.length/2)];
+ };
 
- // EAR threshold adaptif. Contoh baseline 0.28 -> close ~0.20,
- // recovery ~0.25. Batas bawah mencegah threshold terlalu rendah.
- const closeThreshold=Math.max(0.14,eyeBase*0.72);
- const openThreshold=Math.max(0.18,eyeBase*0.86);
+ const baseYaw=median(yawSamples);
+ const baseEye=median(eyeSamples);
+
+ // Threshold relatif terhadap mata pengguna.
+ // Tidak menggunakan angka absolut yang sama untuk semua orang.
+ const closeThreshold=Math.max(0.12,baseEye*0.82);
+ const openThreshold=Math.max(0.15,baseEye*0.90);
 
  detail(c==='BLINK'
-   ? 'Kedipkan mata sekali. Sistem akan membaca beberapa frame.'
-   : 'Gerakkan kepala perlahan sesuai arah yang diminta.');
+  ? 'Wajah ditemukan. Sekarang kedip sekali.'
+  : 'Wajah ditemukan. Sekarang ikuti arah yang diminta.');
 
- while(Date.now()-start<maxMs){
-   const now=Date.now();
-   if(now-lastDetection<70){ await new Promise(r=>setTimeout(r,25)); continue; }
-   lastDetection=now;
+ let closedFrames=0;
+ let openFrames=0;
+ let lastDetection=0;
+ let noFaceCount=0;
 
-   const r=await detect();
-   if(!r){
-     msg(text);
-     await new Promise(r=>setTimeout(r,70));
-     continue;
+ while(Date.now()-started<maxMs){
+  const now=Date.now();
+
+  if(now-lastDetection<85){
+   await new Promise(r=>setTimeout(r,20));
+   continue;
+  }
+  lastDetection=now;
+
+  const r=await detectLandmarks();
+
+  if(!r){
+   noFaceCount++;
+   if(noFaceCount>=3) msg('Wajah hilang. Kembali ke oval.');
+   await new Promise(r=>setTimeout(r,45));
+   continue;
+  }
+
+  noFaceCount=0;
+  const p=r.landmarks.positions;
+  const e=ear(p);
+  const y=yaw(p);
+
+  if(c==='BLINK'){
+   // Satu frame mata tertutup sudah cukup untuk "arming".
+   // Recovery harus terlihat pada frame berikutnya.
+   if(e<closeThreshold){
+    closedFrames++;
+    openFrames=0;
+    progress(45);
+   }else if(closedFrames>0 && e>openThreshold){
+    openFrames++;
+    if(openFrames>=1){
+     progress(70);
+     return {
+      passed:true,
+      score:98,
+      challenge:c,
+      baselineEAR:baseEye
+     };
+    }
+   }
+  }else{
+   const delta=y-baseYaw;
+
+   // Sedikit lebih toleran terhadap variasi kamera dan wajah.
+   const threshold=0.055;
+
+   if(c==='TURN_RIGHT' && delta>threshold){
+    progress(70);
+    return {passed:true,score:96,challenge:c,baselineYaw:baseYaw};
    }
 
-   const p=r.landmarks.positions;
-   const e=ear(p), y=yaw(p);
-
-   if(c==='BLINK'){
-     // Perlu ada mata terbuka -> tertutup -> terbuka lagi.
-     if(!closed && e<closeThreshold){
-       closed=true;
-       progress(45);
-     } else if(closed && e>openThreshold){
-       progress(65);
-       return {passed:true,score:97,challenge:c,baselineEAR:eyeBase};
-     }
-   } else {
-     const delta=y-baseYaw;
-     // Toleransi lebih longgar: ±0.07–0.08 cukup untuk toleh perlahan.
-     const threshold=0.075;
-     if(c==='TURN_RIGHT' && delta>threshold){
-       progress(65);
-       return {passed:true,score:94,challenge:c,baselineYaw:baseYaw};
-     }
-     if(c==='TURN_LEFT' && delta<-threshold){
-       progress(65);
-       return {passed:true,score:94,challenge:c,baselineYaw:baseYaw};
-     }
+   if(c==='TURN_LEFT' && delta<-threshold){
+    progress(70);
+    return {passed:true,score:96,challenge:c,baselineYaw:baseYaw};
    }
+  }
 
-   await new Promise(r=>setTimeout(r,75));
+  await new Promise(r=>setTimeout(r,45));
  }
+
  return {passed:false,score:0,challenge:c,reason:'TIMEOUT'};
 }
+
 function dist(a,b){if(!a||!b||a.length!==128||b.length!==128)return Infinity;let s=0;for(let i=0;i<128;i++){let d=Number(a[i])-Number(b[i]);s+=d*d}return Math.sqrt(s)}
 function score(d,t){return Math.max(0,Math.min(100,100-(d/(Number(t)||.52))*50))}
 async function enroll(){
@@ -181,9 +233,9 @@ async function enroll(){
  let samples=[];
  for(let i=0;i<5;i++){
   msg('Ambil sampel wajah '+(i+1)+'/5');progress(40+i*10);
-  let r=await detect();
-  if(!r){i--;await new Promise(r=>setTimeout(r,350));continue}
-  samples.push(Array.from(r.descriptor));await new Promise(r=>setTimeout(r,350))
+  let r=await detectDescriptor();
+  if(!r){i--;await new Promise(r=>setTimeout(r,180));continue}
+  samples.push(Array.from(r.descriptor));await new Promise(r=>setTimeout(r,220))
  }
  progress(95);msg('Registrasi wajah selesai.');
  send('ENROLL_RESULT',{nonce:FACE.cfg.nonce,success:true,liveness:true,livenessScore:live.score,samples});
@@ -193,7 +245,7 @@ async function verify(){
  const ok=await loadEngine();if(!ok)return fail('AI_ENGINE','Mesin AI gagal dimuat.');
  const live=await liveness();if(!live.passed)return fail('LIVENESS','Liveness gagal.');
  msg('Mencocokkan wajah...');progress(55);
- const r=await detect();if(!r)return fail('NO_FACE','Wajah tidak terdeteksi.');
+ const r=await detectDescriptor();if(!r)return fail('NO_FACE','Wajah tidak terdeteksi.');
  const d=dist(Array.from(r.descriptor),FACE.cfg.descriptor),s=score(d,FACE.cfg.threshold);
  const passed=d<=(FACE.cfg.threshold||.52);
  progress(90);msg(passed?'✓ Wajah cocok':'✕ Wajah tidak cocok');
