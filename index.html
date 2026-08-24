@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>Foto Kelas</title>
+<title>Foto Kelas V3</title>
 <style>
 *{box-sizing:border-box}body{margin:0;background:#07111f;color:#fff;font-family:Arial,sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center}
 .card{width:min(520px,100%);min-height:100vh;background:#0b1728;display:flex;flex-direction:column}
@@ -39,9 +39,11 @@ function send(type,data){
   try{ if(window.opener) window.opener.postMessage(Object.assign({source:'CLASS_CAMERA_V1',type:type},data||{}),parentOrigin||'*'); }catch(e){}
 }
 async function openCamera(){
-  // IMPORTANT: INIT_CLASS_PHOTO can be sent more than once while the
-  // parent waits for CAMERA_READY. Never recreate the stream or reload
-  // video.srcObject when the camera is already active.
+  // Do not call video.play() manually. The video element has autoplay +
+  // playsinline + muted, so Chrome can start the MediaStream without the
+  // play()/srcObject race that produced:
+  // "The play() request was interrupted by a new load request."
+
   if (stream && stream.getTracks().some(t => t.readyState === 'live') &&
       video.srcObject === stream) {
     statusEl.textContent='Kamera aktif. Pastikan guru dan kondisi kelas terlihat jelas.';
@@ -52,35 +54,47 @@ async function openCamera(){
     throw new Error('Browser tidak mendukung kamera.');
   }
 
-  stream=await navigator.mediaDevices.getUserMedia({
+  const newStream=await navigator.mediaDevices.getUserMedia({
     video:{facingMode:{ideal:'environment'},width:{ideal:1280},height:{ideal:720}},
     audio:false
   });
 
+  stream=newStream;
+  video.autoplay=true;
+  video.playsInline=true;
+  video.muted=true;
+
+  // Attach the stream only once.
   video.srcObject=stream;
 
-  // Wait for metadata before playing. This avoids the
-  // "play() request was interrupted by a new load request" race.
-  await new Promise((resolve, reject) => {
-    let done=false;
-    const finish=()=>{
-      if(done) return;
-      done=true;
-      video.removeEventListener('loadedmetadata', finish);
+  // Wait until the browser has actual video frames.
+  await new Promise((resolve,reject)=>{
+    if(video.readyState >= 2 && video.videoWidth > 0) {
+      resolve();
+      return;
+    }
+
+    const onReady=()=>{
+      cleanup();
       resolve();
     };
-    video.addEventListener('loadedmetadata', finish, {once:true});
-    setTimeout(finish, 2500);
-  });
+    const timer=setTimeout(()=>{
+      cleanup();
+      if(video.videoWidth > 0) resolve();
+      else reject(new Error('Kamera aktif tetapi gambar belum tersedia.'));
+    },5000);
 
-  try {
-    await video.play();
-  } catch (err) {
-    // A second play attempt after the browser has attached the stream
-    // is safer than allowing a transient interrupted play to surface.
-    await new Promise(r => setTimeout(r, 150));
-    await video.play();
-  }
+    const cleanup=()=>{
+      clearTimeout(timer);
+      video.removeEventListener('loadedmetadata',onReady);
+      video.removeEventListener('canplay',onReady);
+      video.removeEventListener('playing',onReady);
+    };
+
+    video.addEventListener('loadedmetadata',onReady,{once:true});
+    video.addEventListener('canplay',onReady,{once:true});
+    video.addEventListener('playing',onReady,{once:true});
+  });
 
   statusEl.textContent='Kamera aktif. Pastikan guru dan kondisi kelas terlihat jelas.';
 }
@@ -119,6 +133,8 @@ window.addEventListener('message',async e=>{
   }
 
   if(initialized) {
+    // Parent may send INIT more than once. Acknowledge only; never touch
+    // srcObject again.
     send('CAMERA_READY',{});
     return;
   }
