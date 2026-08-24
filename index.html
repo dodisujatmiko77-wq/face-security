@@ -40,10 +40,20 @@ function msg(t){$('msg').textContent=t}
 function detail(t){$('detail').textContent=t}
 function badge(t){$('badge').textContent=t}
 function progress(n){$('bar').style.width=Math.max(0,Math.min(100,n))+'%'}
-function send(type,payload){
- if(!window.opener) return;
- window.opener.postMessage({source:'FACE_SECURITY_V32',type,...payload},FACE.parentOrigin||'*');
+function send(type,data){
+  try{
+    if(!window.opener || window.opener.closed) return false;
+    window.opener.postMessage(
+      Object.assign({source:SOURCE,type:type},data||{}),
+      FACE.parentOrigin||'*'
+    );
+    return true;
+  }catch(e){
+    console.error('postMessage error:',e);
+    return false;
+  }
 }
+
 async function models(base){
  await Promise.all([
   faceapi.nets.tinyFaceDetector.loadFromUri(base),
@@ -320,62 +330,83 @@ async function enroll(){
  stopCamera();detail('Hasil dikirim kembali ke aplikasi.');progress(100)
 }
 async function verify(){
- const ok=await loadEngine();if(!ok)return fail('AI_ENGINE','Mesin AI gagal dimuat.');
- const live=await liveness();if(!live.passed)return fail('LIVENESS','Liveness gagal.');
- msg('Mencocokkan wajah...');progress(55);
- const r=await detectDescriptor();if(!r)return fail('NO_FACE','Wajah tidak terdeteksi.');
- const d=dist(Array.from(r.descriptor),FACE.cfg.descriptor),s=score(d,FACE.cfg.threshold);
- const passed=d<=(FACE.cfg.threshold||.52);
+  badge('FACE VERIFY');
+  msg('Mencocokkan wajah...');
+  detail('Jangan bergerak sampai hasil verifikasi dikirim.');
 
- // Ambil foto bukti dari frame kamera setelah liveness + face match.
- let selfieData='';
- try{
-  const video=$('video');
-  const canvas=document.createElement('canvas');
-  const maxW=640;
-  const vw=video.videoWidth||640;
-  const vh=video.videoHeight||480;
-  const scale=Math.min(1,maxW/vw);
-  canvas.width=Math.max(1,Math.round(vw*scale));
-  canvas.height=Math.max(1,Math.round(vh*scale));
-  const ctx=canvas.getContext('2d');
-  ctx.save();
-  ctx.translate(canvas.width,0);
-  ctx.scale(-1,1);
-  ctx.drawImage(video,0,0,canvas.width,canvas.height);
-  ctx.restore();
-  selfieData=canvas.toDataURL('image/jpeg',0.72);
- }catch(e){
-  console.warn('SELFIE CAPTURE ERROR',e);
- }
+  const r=await detectLandmarks();
+  if(!r){
+    fail('FACE_NO_MATCH','Wajah tidak terdeteksi untuk pencocokan.');
+    return;
+  }
 
- progress(90);msg(passed?'✓ Wajah cocok':'✕ Wajah tidak cocok');
- send('VERIFY_RESULT',{
-  nonce:FACE.cfg.nonce,
-  success:true,
-  faceVerified:passed,
-  faceScore:Math.round(s*10)/10,
-  distance:Math.round(d*1000)/1000,
-  threshold:FACE.cfg.threshold||.52,
-  liveness:true,
-  livenessScore:live.score,
-  selfieData:selfieData
- });
- stopCamera();progress(100)
+  const emb=embeddingFromLandmarks(r.landmarks);
+  const d=dist(emb,FACE.cfg.profile.embedding);
+  const threshold=FACE.cfg.threshold||.52;
+
+  if(d>threshold){
+    fail('FACE_MISMATCH','Wajah tidak cocok dengan profil guru. Silakan ulangi.');
+    return;
+  }
+
+  const live=await liveness();
+  if(!live || !live.passed){
+    fail('LIVENESS_'+(live && live.reason ? live.reason : 'FAILED'),
+         'Liveness gagal. Silakan ikuti instruksi gerakan wajah.');
+    return;
+  }
+
+  FACE.verificationCompleted=true;
+  badge('VERIFIED');
+  msg('✓ Wajah cocok dan liveness berhasil.');
+  detail('Verifikasi berhasil. Mengirim hasil ke aplikasi...');
+
+  const sent=send('VERIFY_RESULT',{
+    nonce:FACE.cfg.nonce,
+    success:true,
+    faceVerified:true,
+    livenessPassed:true,
+    distance:d,
+    score:Math.max(0,Math.min(1,1-d)),
+    selfieData:makeSelfieData(),
+    diagnosticCode:'VERIFIED'
+  });
+
+  if(!sent){
+    badge('POST_VERIFY_WINDOW');
+    detail('Verifikasi berhasil, tetapi aplikasi utama tidak menerima hasil.');
+    return;
+  }
+
+  await new Promise(r=>setTimeout(r,250));
+  stopCamera();
+  badge('DONE');
+  msg('✓ Verifikasi selesai.');
+  detail('Silakan kembali ke aplikasi absensi.');
 }
+
+
 function fail(reason,text){
   const code=reason||'UNKNOWN';
+  if(FACE.verificationCompleted){
+    console.warn('Ignored post-verification error:',code,text);
+    return;
+  }
   msg('❌ '+text);
   detail('Kode: '+code+' — proses dihentikan. Silakan Coba Lagi.');
   badge(code);
-  send('FACE_ERROR',{
+  send({
+    source:SOURCE,
+    type:'FACE_ERROR',
     nonce:FACE.cfg?.nonce,
     reason:code,
     message:text,
     diagnosticCode:code
   });
+  stopCamera();
   $('retry').style.display='block';
 }
+
 async function begin(cfg){
   FACE.cfg=cfg||{};
   FACE.parentOrigin=cfg.parentOrigin||window.location.origin;
