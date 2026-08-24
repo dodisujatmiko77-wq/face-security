@@ -61,10 +61,70 @@ async function loadEngine(){
  }catch(e){badge('AI ERROR');msg('Mesin AI gagal dimuat.');detail(e.message||String(e));return false}
 }
 async function openCamera(){
- if(!navigator.mediaDevices?.getUserMedia)throw new Error('Browser tidak menyediakan getUserMedia.');
- FACE.stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'user'},width:{ideal:720},height:{ideal:540}},audio:false});
- $('video').srcObject=FACE.stream;await $('video').play();badge('CAMERA OK')
+  if(!window.isSecureContext){
+    const e=new Error('Halaman kamera harus dibuka melalui HTTPS.');
+    e.code='INSECURE_CONTEXT';
+    throw e;
+  }
+
+  if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
+    const e=new Error('Browser tidak menyediakan akses kamera (getUserMedia).');
+    e.code='MEDIA_DEVICES_UNAVAILABLE';
+    throw e;
+  }
+
+  badge('CAMERA CHECK');
+  msg('Meminta akses kamera...');
+  detail('Pastikan kamera tidak sedang digunakan aplikasi lain.');
+
+  // iPhone/Safari: mulai dengan constraints sederhana. Setelah stream
+  // berhasil, kualitas kamera tidak dipaksa terlalu ketat.
+  let stream = null;
+  try{
+    stream = await navigator.mediaDevices.getUserMedia({
+      video:{
+        facingMode:'user'
+      },
+      audio:false
+    });
+  }catch(e1){
+    // Fallback kedua: kamera video default tanpa facingMode.
+    try{
+      stream = await navigator.mediaDevices.getUserMedia({
+        video:true,
+        audio:false
+      });
+    }catch(e2){
+      e2.originalError=e1;
+      throw e2;
+    }
+  }
+
+  FACE.stream=stream;
+  const video=$('video');
+  video.srcObject=stream;
+
+  // Safari may need an explicit load/play cycle.
+  try{video.setAttribute('playsinline','');}catch(e){}
+  try{video.muted=true;}catch(e){}
+  try{await video.play();}catch(e){/* continue; metadata check below */}
+
+  const started=Date.now();
+  while(Date.now()-started<5000){
+    if(video.readyState>=2 && video.videoWidth>0 && video.videoHeight>0){
+      badge('CAMERA OK');
+      msg('Kamera aktif.');
+      detail('Video siap. Menyiapkan mesin Face Recognition...');
+      return true;
+    }
+    await new Promise(r=>setTimeout(r,120));
+  }
+
+  const e=new Error('Kamera berhasil diberi izin tetapi video belum siap.');
+  e.code='VIDEO_NOT_READY';
+  throw e;
 }
+
 function stopCamera(){
  if(FACE.stream){FACE.stream.getTracks().forEach(t=>t.stop());FACE.stream=null}
  $('video').srcObject=null
@@ -93,136 +153,154 @@ function yaw(p){
  return (nose.x-(lx+rx)/2)/(Math.abs(rx-lx)||1)
 }
 async function liveness(){
- // V3.4: liveness dibuat lebih cepat dengan detector ringan.
- // Descriptor 128D TIDAK dihitung selama liveness; hanya landmark wajah.
- const challenges=['BLINK','TURN_RIGHT','TURN_LEFT'];
- const c=challenges[Math.floor(Math.random()*challenges.length)];
- const text={
-  BLINK:'Kedipkan mata sekali',
-  TURN_RIGHT:'Toleh perlahan ke kanan',
-  TURN_LEFT:'Toleh perlahan ke kiri'
- }[c];
+  const challenges=['BLINK','TURN_RIGHT','TURN_LEFT'];
+  const c=challenges[Math.floor(Math.random()*challenges.length)];
+  const text={
+    BLINK:'Kedipkan mata sekali',
+    TURN_RIGHT:'Toleh perlahan ke kanan',
+    TURN_LEFT:'Toleh perlahan ke kiri'
+  }[c];
 
- msg(text);
- detail('Mencari wajah... lihat kamera dari jarak normal.');
- progress(5);
+  msg(text);
+  detail('Pastikan seluruh wajah berada di dalam oval dan pencahayaan cukup.');
+  progress(5);
 
- const started=Date.now();
- const maxMs=9000;
+  // Lebih toleran untuk kamera iPhone/Safari dan first-load AI.
+  const started=Date.now();
+  const calibrationMs=4000;
+  const maxMs=15000;
 
- // Kalibrasi singkat: cukup 3 frame wajah yang stabil.
- let yawSamples=[];
- let eyeSamples=[];
- let attempts=0;
+  let yawSamples=[];
+  let eyeSamples=[];
+  let attempts=0;
 
- while(Date.now()-started<1800 && (yawSamples.length<3 || eyeSamples.length<3)){
-  attempts++;
-  const r=await detectLandmarks();
+  while(Date.now()-started<calibrationMs &&
+        (yawSamples.length<4 || eyeSamples.length<4)){
+    attempts++;
+    const r=await detectLandmarks();
 
-  if(r){
-   const p=r.landmarks.positions;
-   const e=ear(p);
-   const y=yaw(p);
+    if(r){
+      const p=r.landmarks.positions;
+      const e=ear(p);
+      const y=yaw(p);
 
-   if(Number.isFinite(e) && e>0.10 && e<0.60) eyeSamples.push(e);
-   if(Number.isFinite(y)) yawSamples.push(y);
+      if(Number.isFinite(e) && e>0.08 && e<0.65) eyeSamples.push(e);
+      if(Number.isFinite(y)) yawSamples.push(y);
 
-   progress(Math.min(25,8+Math.round((Math.min(yawSamples.length,3)/3)*17)));
-   if(yawSamples.length>=3 && eyeSamples.length>=3) break;
-  }
-
-  await new Promise(r=>setTimeout(r,90));
- }
-
- if(yawSamples.length<2 || eyeSamples.length<2){
-  return {passed:false,score:0,challenge:c,reason:'FACE_NOT_STABLE'};
- }
-
- const median=a=>{
-  a=a.slice().sort((x,y)=>x-y);
-  return a[Math.floor(a.length/2)];
- };
-
- const baseYaw=median(yawSamples);
- const baseEye=median(eyeSamples);
-
- // Threshold relatif terhadap mata pengguna.
- // Tidak menggunakan angka absolut yang sama untuk semua orang.
- const closeThreshold=Math.max(0.12,baseEye*0.82);
- const openThreshold=Math.max(0.15,baseEye*0.90);
-
- detail(c==='BLINK'
-  ? 'Wajah ditemukan. Sekarang kedip sekali.'
-  : 'Wajah ditemukan. Sekarang ikuti arah yang diminta.');
-
- let closedFrames=0;
- let openFrames=0;
- let lastDetection=0;
- let noFaceCount=0;
-
- while(Date.now()-started<maxMs){
-  const now=Date.now();
-
-  if(now-lastDetection<85){
-   await new Promise(r=>setTimeout(r,20));
-   continue;
-  }
-  lastDetection=now;
-
-  const r=await detectLandmarks();
-
-  if(!r){
-   noFaceCount++;
-   if(noFaceCount>=3) msg('Wajah hilang. Kembali ke oval.');
-   await new Promise(r=>setTimeout(r,45));
-   continue;
-  }
-
-  noFaceCount=0;
-  const p=r.landmarks.positions;
-  const e=ear(p);
-  const y=yaw(p);
-
-  if(c==='BLINK'){
-   // Satu frame mata tertutup sudah cukup untuk "arming".
-   // Recovery harus terlihat pada frame berikutnya.
-   if(e<closeThreshold){
-    closedFrames++;
-    openFrames=0;
-    progress(45);
-   }else if(closedFrames>0 && e>openThreshold){
-    openFrames++;
-    if(openFrames>=1){
-     progress(70);
-     return {
-      passed:true,
-      score:98,
-      challenge:c,
-      baselineEAR:baseEye
-     };
+      progress(Math.min(30,8+Math.round(
+        (Math.min(yawSamples.length,4)/4)*22
+      )));
+    }else{
+      msg('Wajah belum terdeteksi. Posisikan wajah di dalam oval.');
     }
-   }
-  }else{
-   const delta=y-baseYaw;
 
-   // Sedikit lebih toleran terhadap variasi kamera dan wajah.
-   const threshold=0.055;
-
-   if(c==='TURN_RIGHT' && delta>threshold){
-    progress(70);
-    return {passed:true,score:96,challenge:c,baselineYaw:baseYaw};
-   }
-
-   if(c==='TURN_LEFT' && delta<-threshold){
-    progress(70);
-    return {passed:true,score:96,challenge:c,baselineYaw:baseYaw};
-   }
+    await new Promise(r=>setTimeout(r,100));
   }
 
-  await new Promise(r=>setTimeout(r,45));
- }
+  if(yawSamples.length<2 || eyeSamples.length<2){
+    return {
+      passed:false,
+      score:0,
+      challenge:c,
+      reason:'FACE_NOT_STABLE'
+    };
+  }
 
- return {passed:false,score:0,challenge:c,reason:'TIMEOUT'};
+  const median=a=>{
+    a=a.slice().sort((x,y)=>x-y);
+    return a[Math.floor(a.length/2)];
+  };
+
+  const baseYaw=median(yawSamples);
+  const baseEye=median(eyeSamples);
+
+  const closeThreshold=Math.max(0.11,baseEye*0.82);
+  const openThreshold=Math.max(0.14,baseEye*0.90);
+
+  detail(c==='BLINK'
+    ? 'Wajah ditemukan. Kedipkan mata sekali lalu buka kembali.'
+    : 'Wajah ditemukan. Ikuti arah kepala yang diminta.'
+  );
+
+  let closedFrames=0;
+  let openFrames=0;
+  let lastDetection=0;
+  let noFaceCount=0;
+
+  while(Date.now()-started<maxMs){
+    const now=Date.now();
+
+    if(now-lastDetection<90){
+      await new Promise(r=>setTimeout(r,25));
+      continue;
+    }
+
+    lastDetection=now;
+    const r=await detectLandmarks();
+
+    if(!r){
+      noFaceCount++;
+      if(noFaceCount>=2) msg('Wajah hilang. Kembali ke oval.');
+      await new Promise(r=>setTimeout(r,55));
+      continue;
+    }
+
+    noFaceCount=0;
+    const p=r.landmarks.positions;
+    const e=ear(p);
+    const y=yaw(p);
+
+    if(c==='BLINK'){
+      if(e<closeThreshold){
+        closedFrames++;
+        openFrames=0;
+        progress(Math.max(40,Math.min(65,40+closedFrames*6)));
+      }else if(closedFrames>0 && e>openThreshold){
+        openFrames++;
+        if(openFrames>=1){
+          progress(75);
+          return {
+            passed:true,
+            score:98,
+            challenge:c,
+            baselineEAR:baseEye
+          };
+        }
+      }
+    }else{
+      const delta=y-baseYaw;
+      const threshold=0.045;
+
+      if(c==='TURN_RIGHT' && delta>threshold){
+        progress(75);
+        return {
+          passed:true,
+          score:96,
+          challenge:c,
+          baselineYaw:baseYaw
+        };
+      }
+
+      if(c==='TURN_LEFT' && delta<-threshold){
+        progress(75);
+        return {
+          passed:true,
+          score:96,
+          challenge:c,
+          baselineYaw:baseYaw
+        };
+      }
+    }
+
+    await new Promise(r=>setTimeout(r,50));
+  }
+
+  return {
+    passed:false,
+    score:0,
+    challenge:c,
+    reason:'TIMEOUT'
+  };
 }
 
 function dist(a,b){if(!a||!b||a.length!==128||b.length!==128)return Infinity;let s=0;for(let i=0;i<128;i++){let d=Number(a[i])-Number(b[i]);s+=d*d}return Math.sqrt(s)}
@@ -285,13 +363,74 @@ async function verify(){
  });
  stopCamera();progress(100)
 }
-function fail(reason,text){msg(text);detail('Proses dihentikan.');send('FACE_ERROR',{nonce:FACE.cfg?.nonce,reason,message:text});$('retry').style.display='block'}
-async function begin(cfg){
- FACE.cfg=cfg||{};FACE.parentOrigin=cfg.parentOrigin||window.location.origin;
- $('mode').textContent=cfg.mode==='enroll'?'Pendaftaran wajah':'Verifikasi absensi';
- try{await openCamera();msg('Kamera aktif.');detail('Menyiapkan AI dan kalibrasi wajah...');if(cfg.mode==='enroll')await enroll();else await verify()}
- catch(e){console.error(e);let m=e.name==='NotAllowedError'?'Izin kamera diblokir oleh browser/host.':e.name==='NotFoundError'?'Kamera tidak ditemukan.':e.name==='NotReadableError'?'Kamera sedang dipakai aplikasi lain.':(e.message||String(e));fail('CAMERA',m)}
+function fail(reason,text){
+  const code=reason||'UNKNOWN';
+  msg('❌ '+text);
+  detail('Kode: '+code+' — proses dihentikan. Silakan Coba Lagi.');
+  badge(code);
+  send('FACE_ERROR',{
+    nonce:FACE.cfg?.nonce,
+    reason:code,
+    message:text,
+    diagnosticCode:code
+  });
+  $('retry').style.display='block';
 }
+async function begin(cfg){
+  FACE.cfg=cfg||{};
+  FACE.parentOrigin=cfg.parentOrigin||window.location.origin;
+
+  $('mode').textContent=cfg.mode==='enroll'
+    ? 'Pendaftaran wajah'
+    : 'Verifikasi absensi';
+
+  $('retry').style.display='none';
+
+  try{
+    await openCamera();
+    const ok=await loadEngine();
+
+    if(!ok){
+      fail('AI_ENGINE','Mesin Face Recognition gagal dimuat.');
+      return;
+    }
+
+    if(cfg.mode==='enroll'){
+      await enroll();
+    }else{
+      await verify();
+    }
+
+  }catch(e){
+    console.error('FACE SECURITY ERROR',e);
+
+    let code=e.code||e.name||'CAMERA';
+    let m=e.message||String(e);
+
+    if(e.name==='NotAllowedError'){
+      code='CAMERA_NOT_ALLOWED';
+      m='Browser menolak akses kamera. Pastikan izin Kamera untuk situs Face Security = Izinkan.';
+    }else if(e.name==='NotFoundError'){
+      code='CAMERA_NOT_FOUND';
+      m='Kamera tidak ditemukan pada perangkat.';
+    }else if(e.name==='NotReadableError'){
+      code='CAMERA_NOT_READABLE';
+      m='Kamera sedang digunakan aplikasi lain atau tidak dapat dibaca.';
+    }else if(e.name==='OverconstrainedError'){
+      code='CAMERA_CONSTRAINT';
+      m='Konfigurasi kamera tidak didukung. Mencoba konfigurasi sederhana.';
+    }else if(e.name==='SecurityError'){
+      code='CAMERA_SECURITY';
+      m='Browser memblokir kamera karena konteks keamanan halaman.';
+    }else if(e.code==='VIDEO_NOT_READY'){
+      code='VIDEO_NOT_READY';
+      m=e.message;
+    }
+
+    fail(code,m);
+  }
+}
+
 window.addEventListener('message',e=>{
  if(!window.opener||e.source!==window.opener)return;
  if(e.data?.source!=='ABSENSI_APP_V32')return;
@@ -299,7 +438,7 @@ window.addEventListener('message',e=>{
  if(e.data.type==='INIT_FACE')begin(e.data.config||{})
 });
 $('cancel').onclick=()=>{send('CANCEL',{nonce:FACE.cfg?.nonce});stopCamera();window.close()}
-$('retry').onclick=()=>{if(FACE.cfg){$('retry').style.display='none';stopCamera();begin(FACE.cfg)}}
+$('retry').onclick=()=>{if(FACE.cfg){$('retry').style.display='none';stopCamera();progress(0);badge('CAMERA');msg('Mencoba kembali...');begin(FACE.cfg)}}
 // Request initialization explicitly after opening.
 setTimeout(()=>send('READY',{}),100);
 </script>
