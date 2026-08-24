@@ -21,7 +21,7 @@ footer{padding:16px;display:grid;grid-template-columns:1fr 1fr;gap:10px}
 <div class="card">
 <header><h1 id="title">Foto Kelas</h1><div class="sub">Bukti visual kegiatan mengajar</div></header>
 <main>
-<div class="preview"><video id="video" playsinline muted></video></div>
+<div class="preview"><video id="video" autoplay playsinline muted></video></div>
 <div id="status" class="status">Menyiapkan kamera...</div>
 <div id="error" class="error"></div>
 </main>
@@ -31,7 +31,7 @@ footer{padding:16px;display:grid;grid-template-columns:1fr 1fr;gap:10px}
 </footer>
 </div>
 <script>
-let stream=null,parentOrigin='*',initialized=false,cameraState='idle';
+let stream=null,parentOrigin='*',initialized=false;
 const video=document.getElementById('video');
 const statusEl=document.getElementById('status');
 const errorEl=document.getElementById('error');
@@ -39,72 +39,67 @@ function send(type,data){
   try{ if(window.opener) window.opener.postMessage(Object.assign({source:'CLASS_CAMERA_V1',type:type},data||{}),parentOrigin||'*'); }catch(e){}
 }
 async function openCamera(){
-  if (cameraState === 'starting' || cameraState === 'ready') return;
+  // Do not call video.play() manually. The video element has autoplay +
+  // playsinline + muted, so Chrome can start the MediaStream without the
+  // play()/srcObject race that produced:
+  // "The play() request was interrupted by a new load request."
 
-  cameraState = 'starting';
-  statusEl.textContent = 'Meminta akses kamera...';
+  if (stream && stream.getTracks().some(t => t.readyState === 'live') &&
+      video.srcObject === stream) {
+    statusEl.textContent='Kamera aktif. Pastikan guru dan kondisi kelas terlihat jelas.';
+    return;
+  }
 
   if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
-    cameraState='idle';
     throw new Error('Browser tidak mendukung kamera.');
   }
 
-  const newStream = await navigator.mediaDevices.getUserMedia({
-    video:{
-      width:{ideal:1280},
-      height:{ideal:720},
-      facingMode:{ideal:'environment'}
-    },
+  const newStream=await navigator.mediaDevices.getUserMedia({
+    video:{facingMode:{ideal:'environment'},width:{ideal:1280},height:{ideal:720}},
     audio:false
   });
 
-  // If something unexpectedly started a second stream, stop it.
-  if(stream){
-    stream.getTracks().forEach(t=>{try{t.stop()}catch(e){}});
-  }
-  stream = newStream;
+  stream=newStream;
+  video.autoplay=true;
+  video.playsInline=true;
+  video.muted=true;
 
-  // Set the stream exactly once for this camera session.
-  video.srcObject = stream;
-  video.muted = true;
-  video.playsInline = true;
-  video.autoplay = false;
+  // Attach the stream only once.
+  video.srcObject=stream;
 
+  // Wait until the browser has actual video frames.
   await new Promise((resolve,reject)=>{
-    const timeout=setTimeout(()=>{
+    if(video.readyState >= 2 && video.videoWidth > 0) {
+      resolve();
+      return;
+    }
+
+    const onReady=()=>{
       cleanup();
-      reject(new Error('Kamera aktif tetapi gambar belum siap.'));
-    },7000);
+      resolve();
+    };
+    const timer=setTimeout(()=>{
+      cleanup();
+      if(video.videoWidth > 0) resolve();
+      else reject(new Error('Kamera aktif tetapi gambar belum tersedia.'));
+    },5000);
 
-    function cleanup(){
-      clearTimeout(timeout);
-      video.removeEventListener('loadedmetadata',ready);
-      video.removeEventListener('canplay',ready);
-    }
-    function ready(){
-      if(video.videoWidth > 0 && video.videoHeight > 0){
-        cleanup();
-        resolve();
-      }
-    }
+    const cleanup=()=>{
+      clearTimeout(timer);
+      video.removeEventListener('loadedmetadata',onReady);
+      video.removeEventListener('canplay',onReady);
+      video.removeEventListener('playing',onReady);
+    };
 
-    video.addEventListener('loadedmetadata',ready);
-    video.addEventListener('canplay',ready);
-
-    // Some browsers fire metadata before listeners are attached.
-    ready();
+    video.addEventListener('loadedmetadata',onReady,{once:true});
+    video.addEventListener('canplay',onReady,{once:true});
+    video.addEventListener('playing',onReady,{once:true});
   });
 
-  // Exactly ONE play request for the lifetime of this stream.
-  await video.play();
-
-  cameraState='ready';
   statusEl.textContent='Kamera aktif. Pastikan guru dan kondisi kelas terlihat jelas.';
 }
 function stop(){
-  cameraState='idle';
   if(stream){stream.getTracks().forEach(t=>{try{t.stop()}catch(e){}});stream=null}
-  try{video.pause()}catch(e){}
   video.srcObject=null;
 }
 async function capture(){
@@ -122,23 +117,34 @@ async function capture(){
 }
 window.addEventListener('message',async e=>{
   if(!window.opener || e.source!==window.opener) return;
-  if(!e.data || e.data.source!=='ABSENSI_APP_V32') return;
+  if(!e.data || (e.data.source!=='ABSENSI_APP_V32' && e.data.source!=='MONITORING_KELAS_APP_V32')) return;
   if(e.data.type!=='INIT_CLASS_PHOTO') return;
 
   parentOrigin=e.data.parentOrigin||e.origin||'*';
   document.getElementById('title').textContent=e.data.title||'Foto Kelas';
 
-  // Ignore duplicate INIT messages while startup is running.
-  // Only send CAMERA_READY after openCamera() has completely finished.
-  if(cameraState==='starting' || cameraState==='ready'){
+  // If the camera is already active, only acknowledge the parent.
+  // Do NOT call openCamera() again.
+  if(stream && stream.getTracks().some(t => t.readyState === 'live') &&
+     video.srcObject === stream) {
+    initialized=true;
+    send('CAMERA_READY',{});
     return;
   }
+
+  if(initialized) {
+    // Parent may send INIT more than once. Acknowledge only; never touch
+    // srcObject again.
+    send('CAMERA_READY',{});
+    return;
+  }
+
+  initialized=true;
 
   try{
     await openCamera();
     send('CAMERA_READY',{});
   }catch(err){
-    cameraState='idle';
     let msg='Kamera tidak dapat diakses.';
     if(err.name==='NotAllowedError') msg='Izin kamera ditolak browser. Izinkan kamera untuk situs ini.';
     else if(err.name==='NotFoundError') msg='Kamera tidak ditemukan.';
@@ -147,6 +153,7 @@ window.addEventListener('message',async e=>{
     errorEl.style.display='block';
     errorEl.textContent=msg;
     statusEl.textContent='Kamera gagal dibuka.';
+    initialized=false;
     send('PHOTO_ERROR',{message:msg,reason:err.name||'CAMERA'});
   }
 });
