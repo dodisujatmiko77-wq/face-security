@@ -39,17 +39,49 @@ function send(type,data){
   try{ if(window.opener) window.opener.postMessage(Object.assign({source:'CLASS_CAMERA_V1',type:type},data||{}),parentOrigin||'*'); }catch(e){}
 }
 async function openCamera(){
+  // IMPORTANT: INIT_CLASS_PHOTO can be sent more than once while the
+  // parent waits for CAMERA_READY. Never recreate the stream or reload
+  // video.srcObject when the camera is already active.
+  if (stream && stream.getTracks().some(t => t.readyState === 'live') &&
+      video.srcObject === stream) {
+    statusEl.textContent='Kamera aktif. Pastikan guru dan kondisi kelas terlihat jelas.';
+    return;
+  }
+
   if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
     throw new Error('Browser tidak mendukung kamera.');
   }
-  // Top-level popup: camera permission is requested here, not inside
-  // Google Apps Script's iframe.
+
   stream=await navigator.mediaDevices.getUserMedia({
     video:{facingMode:{ideal:'environment'},width:{ideal:1280},height:{ideal:720}},
     audio:false
   });
+
   video.srcObject=stream;
-  await video.play();
+
+  // Wait for metadata before playing. This avoids the
+  // "play() request was interrupted by a new load request" race.
+  await new Promise((resolve, reject) => {
+    let done=false;
+    const finish=()=>{
+      if(done) return;
+      done=true;
+      video.removeEventListener('loadedmetadata', finish);
+      resolve();
+    };
+    video.addEventListener('loadedmetadata', finish, {once:true});
+    setTimeout(finish, 2500);
+  });
+
+  try {
+    await video.play();
+  } catch (err) {
+    // A second play attempt after the browser has attached the stream
+    // is safer than allowing a transient interrupted play to surface.
+    await new Promise(r => setTimeout(r, 150));
+    await video.play();
+  }
+
   statusEl.textContent='Kamera aktif. Pastikan guru dan kondisi kelas terlihat jelas.';
 }
 function stop(){
@@ -73,26 +105,44 @@ window.addEventListener('message',async e=>{
   if(!window.opener || e.source!==window.opener) return;
   if(!e.data || e.data.source!=='ABSENSI_APP_V32') return;
   if(e.data.type!=='INIT_CLASS_PHOTO') return;
+
   parentOrigin=e.data.parentOrigin||e.origin||'*';
   document.getElementById('title').textContent=e.data.title||'Foto Kelas';
+
+  // If the camera is already active, only acknowledge the parent.
+  // Do NOT call openCamera() again.
+  if(stream && stream.getTracks().some(t => t.readyState === 'live') &&
+     video.srcObject === stream) {
+    initialized=true;
+    send('CAMERA_READY',{});
+    return;
+  }
+
+  if(initialized) {
+    send('CAMERA_READY',{});
+    return;
+  }
+
   initialized=true;
-  send('CAMERA_READY',{});
+
   try{
     await openCamera();
+    send('CAMERA_READY',{});
   }catch(err){
     let msg='Kamera tidak dapat diakses.';
     if(err.name==='NotAllowedError') msg='Izin kamera ditolak browser. Izinkan kamera untuk situs ini.';
     else if(err.name==='NotFoundError') msg='Kamera tidak ditemukan.';
     else if(err.name==='NotReadableError') msg='Kamera sedang digunakan aplikasi lain.';
     else if(err.message) msg=err.message;
-    errorEl.style.display='block';errorEl.textContent=msg;
+    errorEl.style.display='block';
+    errorEl.textContent=msg;
     statusEl.textContent='Kamera gagal dibuka.';
+    initialized=false;
     send('PHOTO_ERROR',{message:msg,reason:err.name||'CAMERA'});
   }
 });
 document.getElementById('capture').onclick=capture;
 document.getElementById('cancel').onclick=()=>{send('CAMERA_CANCEL',{});stop();window.close()};
-send('CAMERA_READY',{});
 </script>
 </body>
 </html>
