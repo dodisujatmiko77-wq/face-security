@@ -1,477 +1,98 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="id">
 <head>
-<meta charset="UTF-8">
+<meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>Face Security Camera</title>
-<script src="https://cdn.jsdelivr.net/npm/@vladmandic/face-api/dist/face-api.js"></script>
+<title>Foto Kelas</title>
 <style>
-*{box-sizing:border-box}body{margin:0;background:#070916;color:#fff;font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;min-height:100vh;display:grid;place-items:center}
-.card{width:min(94vw,520px);padding:18px;border-radius:28px;background:#111426;box-shadow:0 25px 80px #0008}.head{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}.title{font-weight:900;font-size:18px}.badge{font-size:10px;font-weight:900;background:#252a40;border-radius:999px;padding:7px 10px}
-.stage{position:relative;aspect-ratio:4/3;background:#02030c;border-radius:24px;overflow:hidden}.stage video{width:100%;height:100%;object-fit:cover;transform:scaleX(-1)}.oval{position:absolute;left:50%;top:50%;width:58%;height:78%;transform:translate(-50%,-50%);border:2px solid #ffffffaa;border-radius:50%;box-shadow:0 0 0 999px #0003}.msg{position:absolute;left:14px;right:14px;bottom:14px;background:#000b;border-radius:15px;padding:12px;text-align:center;font-size:12px;font-weight:800}.progress{height:6px;background:#282c40;border-radius:99px;overflow:hidden;margin-top:14px}.bar{height:100%;width:0;background:#5b55ff;transition:width .25s}.small{font-size:10px;color:#aeb3c8;margin-top:10px;line-height:1.5}.actions{display:flex;gap:10px;margin-top:14px}.btn{flex:1;border:0;border-radius:14px;padding:13px;font-weight:900;cursor:pointer}.primary{background:#5147e8;color:#fff}.secondary{background:#24283a;color:#dce0ee}
+*{box-sizing:border-box}body{margin:0;background:#07111f;color:#fff;font-family:Arial,sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center}
+.card{width:min(520px,100%);min-height:100vh;background:#0b1728;display:flex;flex-direction:column}
+header{padding:18px 20px;border-bottom:1px solid #223047}h1{font-size:18px;margin:0 0 6px}.sub{font-size:12px;color:#9fb0c7}
+main{padding:16px;display:flex;flex-direction:column;gap:14px;flex:1}
+.preview{position:relative;border-radius:18px;overflow:hidden;background:#000;min-height:360px;display:flex;align-items:center;justify-content:center}
+video{width:100%;height:100%;object-fit:cover;display:block;transform:scaleX(-1)}
+.status{font-size:12px;color:#cbd5e1;background:#111e31;border-radius:12px;padding:11px}
+button{border:0;border-radius:14px;padding:15px;font-weight:800;font-size:14px;cursor:pointer}
+.capture{background:#10b981;color:#fff}.cancel{background:#263449;color:#dbeafe}.error{background:#3a1720;color:#fecaca;padding:12px;border-radius:12px;font-size:12px;display:none}
+footer{padding:16px;display:grid;grid-template-columns:1fr 1fr;gap:10px}
 </style>
 </head>
 <body>
 <div class="card">
-  <div class="head">
-    <div><div class="title">Registrasi / Verifikasi Wajah</div><div id="mode" class="small">Menghubungkan...</div></div>
-    <div id="badge" class="badge">CAMERA</div>
-  </div>
-  <div class="stage">
-    <video id="video" autoplay muted playsinline></video>
-    <div class="oval"></div>
-    <div id="msg" class="msg">Menunggu perintah dari aplikasi...</div>
-  </div>
-  <div class="progress"><div id="bar" class="bar"></div></div>
-  <div id="detail" class="small">Kamera akan digunakan hanya selama proses verifikasi.</div>
-  <div class="actions">
-    <button class="btn secondary" id="cancel">Tutup</button>
-    <button class="btn primary" id="retry" style="display:none">Coba Lagi</button>
-  </div>
+<header><h1 id="title">Foto Kelas</h1><div class="sub">Bukti visual kegiatan mengajar</div></header>
+<main>
+<div class="preview"><video id="video" autoplay playsinline muted></video></div>
+<div id="status" class="status">Menyiapkan kamera...</div>
+<div id="error" class="error"></div>
+</main>
+<footer>
+<button class="cancel" id="cancel">BATAL</button>
+<button class="capture" id="capture">📸 AMBIL FOTO</button>
+</footer>
 </div>
 <script>
-const FACE={
- model:'https://cdn.jsdelivr.net/gh/vladmandic/face-api@master/model',
- fallback:'https://raw.githubusercontent.com/vladmandic/face-api/master/model',
- loaded:false, stream:null, parentOrigin:null, cfg:null
-};
-const $=id=>document.getElementById(id);
-function msg(t){$('msg').textContent=t}
-function detail(t){$('detail').textContent=t}
-function badge(t){$('badge').textContent=t}
-function progress(n){$('bar').style.width=Math.max(0,Math.min(100,n))+'%'}
+let stream=null,parentOrigin='*',initialized=false;
+const video=document.getElementById('video');
+const statusEl=document.getElementById('status');
+const errorEl=document.getElementById('error');
 function send(type,data){
-  try{
-    if(!window.opener || window.opener.closed) return false;
-    window.opener.postMessage(
-      Object.assign({source:SOURCE,type:type},data||{}),
-      FACE.parentOrigin||'*'
-    );
-    return true;
-  }catch(e){
-    console.error('postMessage error:',e);
-    return false;
-  }
-}
-
-async function models(base){
- await Promise.all([
-  faceapi.nets.tinyFaceDetector.loadFromUri(base),
-  faceapi.nets.faceLandmark68TinyNet.loadFromUri(base),
-  faceapi.nets.faceRecognitionNet.loadFromUri(base)
- ]);
-}
-async function loadEngine(){
- if(FACE.loaded)return true;
- badge('AI LOAD');msg('Memuat mesin Face Recognition...');
- try{
-  try{await faceapi.tf.setBackend('webgl');await faceapi.tf.ready()}catch(e){await faceapi.tf.setBackend('cpu');await faceapi.tf.ready()}
-  try{await models(FACE.model)}catch(e){await models(FACE.fallback)}
-  FACE.loaded=true;badge('AI READY');return true
- }catch(e){badge('AI ERROR');msg('Mesin AI gagal dimuat.');detail(e.message||String(e));return false}
+  try{ if(window.opener) window.opener.postMessage(Object.assign({source:'CLASS_CAMERA_V1',type:type},data||{}),parentOrigin||'*'); }catch(e){}
 }
 async function openCamera(){
-  if(!window.isSecureContext){
-    const e=new Error('Halaman kamera harus dibuka melalui HTTPS.');
-    e.code='INSECURE_CONTEXT';
-    throw e;
-  }
-
   if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
-    const e=new Error('Browser tidak menyediakan akses kamera (getUserMedia).');
-    e.code='MEDIA_DEVICES_UNAVAILABLE';
-    throw e;
+    throw new Error('Browser tidak mendukung kamera.');
   }
-
-  badge('CAMERA CHECK');
-  msg('Meminta akses kamera...');
-  detail('Pastikan kamera tidak sedang digunakan aplikasi lain.');
-
-  // iPhone/Safari: mulai dengan constraints sederhana. Setelah stream
-  // berhasil, kualitas kamera tidak dipaksa terlalu ketat.
-  let stream = null;
-  try{
-    stream = await navigator.mediaDevices.getUserMedia({
-      video:{
-        facingMode:'user'
-      },
-      audio:false
-    });
-  }catch(e1){
-    // Fallback kedua: kamera video default tanpa facingMode.
-    try{
-      stream = await navigator.mediaDevices.getUserMedia({
-        video:true,
-        audio:false
-      });
-    }catch(e2){
-      e2.originalError=e1;
-      throw e2;
-    }
-  }
-
-  FACE.stream=stream;
-  const video=$('video');
+  // Top-level popup: camera permission is requested here, not inside
+  // Google Apps Script's iframe.
+  stream=await navigator.mediaDevices.getUserMedia({
+    video:{facingMode:{ideal:'environment'},width:{ideal:1280},height:{ideal:720}},
+    audio:false
+  });
   video.srcObject=stream;
-
-  // Safari may need an explicit load/play cycle.
-  try{video.setAttribute('playsinline','');}catch(e){}
-  try{video.muted=true;}catch(e){}
-  try{await video.play();}catch(e){/* continue; metadata check below */}
-
-  const started=Date.now();
-  while(Date.now()-started<5000){
-    if(video.readyState>=2 && video.videoWidth>0 && video.videoHeight>0){
-      badge('CAMERA OK');
-      msg('Kamera aktif.');
-      detail('Video siap. Menyiapkan mesin Face Recognition...');
-      return true;
-    }
-    await new Promise(r=>setTimeout(r,120));
-  }
-
-  const e=new Error('Kamera berhasil diberi izin tetapi video belum siap.');
-  e.code='VIDEO_NOT_READY';
-  throw e;
+  await video.play();
+  statusEl.textContent='Kamera aktif. Pastikan guru dan kondisi kelas terlihat jelas.';
 }
-
-function stopCamera(){
- if(FACE.stream){FACE.stream.getTracks().forEach(t=>t.stop());FACE.stream=null}
- $('video').srcObject=null
+function stop(){
+  if(stream){stream.getTracks().forEach(t=>{try{t.stop()}catch(e){}});stream=null}
+  video.srcObject=null;
 }
-// Untuk liveness kita TIDAK menghitung descriptor setiap frame.
-// Descriptor hanya dihitung setelah liveness lolos. Ini membuat deteksi
-// kedip/toleh jauh lebih ringan dan responsif.
-async function detectLandmarks(){
- return await faceapi
-  .detectSingleFace($('video'),new faceapi.TinyFaceDetectorOptions({inputSize:224,scoreThreshold:.40}))
-  .withFaceLandmarks(true)
+async function capture(){
+  if(!video.videoWidth || !video.videoHeight){statusEl.textContent='Kamera belum siap.';return}
+  const canvas=document.createElement('canvas');
+  const scale=Math.min(1,1280/video.videoWidth);
+  canvas.width=Math.max(1,Math.round(video.videoWidth*scale));
+  canvas.height=Math.max(1,Math.round(video.videoHeight*scale));
+  canvas.getContext('2d',{alpha:false}).drawImage(video,0,0,canvas.width,canvas.height);
+  const photoData=canvas.toDataURL('image/jpeg',0.82);
+  statusEl.textContent='Foto berhasil diambil. Mengirim...';
+  document.getElementById('capture').disabled=true;
+  send('PHOTO_RESULT',{photoData:photoData});
+  setTimeout(stop,300);
 }
-async function detectDescriptor(){
- return await faceapi
-  .detectSingleFace($('video'),new faceapi.TinyFaceDetectorOptions({inputSize:224,scoreThreshold:.40}))
-  .withFaceLandmarks(true)
-  .withFaceDescriptor()
-}
-function ear(p){
- function r(i){let a=p[i[0]],b=p[i[1]],c=p[i[2]],d=p[i[3]],e=p[i[4]],f=p[i[5]];let x=Math.hypot(b.x-f.x,b.y-f.y),y=Math.hypot(c.x-e.x,c.y-e.y),z=Math.hypot(a.x-d.x,a.y-d.y);return z?(x+y)/(2*z):0}
- return (r([36,37,38,39,40,41])+r([42,43,44,45,46,47]))/2
-}
-function yaw(p){
- let le=p.slice(36,42),re=p.slice(42,48),nose=p[30];
- let lx=le.reduce((s,x)=>s+x.x,0)/le.length,rx=re.reduce((s,x)=>s+x.x,0)/re.length;
- return (nose.x-(lx+rx)/2)/(Math.abs(rx-lx)||1)
-}
-async function liveness(){
-  const challenges=['BLINK','TURN_RIGHT','TURN_LEFT'];
-  const c=challenges[Math.floor(Math.random()*challenges.length)];
-  const text={
-    BLINK:'Kedipkan mata sekali',
-    TURN_RIGHT:'Toleh perlahan ke kanan',
-    TURN_LEFT:'Toleh perlahan ke kiri'
-  }[c];
-
-  msg(text);
-  detail('Pastikan seluruh wajah berada di dalam oval dan pencahayaan cukup.');
-  progress(5);
-
-  // Lebih toleran untuk kamera iPhone/Safari dan first-load AI.
-  const started=Date.now();
-  const calibrationMs=4000;
-  const maxMs=15000;
-
-  let yawSamples=[];
-  let eyeSamples=[];
-  let attempts=0;
-
-  while(Date.now()-started<calibrationMs &&
-        (yawSamples.length<4 || eyeSamples.length<4)){
-    attempts++;
-    const r=await detectLandmarks();
-
-    if(r){
-      const p=r.landmarks.positions;
-      const e=ear(p);
-      const y=yaw(p);
-
-      if(Number.isFinite(e) && e>0.08 && e<0.65) eyeSamples.push(e);
-      if(Number.isFinite(y)) yawSamples.push(y);
-
-      progress(Math.min(30,8+Math.round(
-        (Math.min(yawSamples.length,4)/4)*22
-      )));
-    }else{
-      msg('Wajah belum terdeteksi. Posisikan wajah di dalam oval.');
-    }
-
-    await new Promise(r=>setTimeout(r,100));
-  }
-
-  if(yawSamples.length<2 || eyeSamples.length<2){
-    return {
-      passed:false,
-      score:0,
-      challenge:c,
-      reason:'FACE_NOT_STABLE'
-    };
-  }
-
-  const median=a=>{
-    a=a.slice().sort((x,y)=>x-y);
-    return a[Math.floor(a.length/2)];
-  };
-
-  const baseYaw=median(yawSamples);
-  const baseEye=median(eyeSamples);
-
-  const closeThreshold=Math.max(0.11,baseEye*0.82);
-  const openThreshold=Math.max(0.14,baseEye*0.90);
-
-  detail(c==='BLINK'
-    ? 'Wajah ditemukan. Kedipkan mata sekali lalu buka kembali.'
-    : 'Wajah ditemukan. Ikuti arah kepala yang diminta.'
-  );
-
-  let closedFrames=0;
-  let openFrames=0;
-  let lastDetection=0;
-  let noFaceCount=0;
-
-  while(Date.now()-started<maxMs){
-    const now=Date.now();
-
-    if(now-lastDetection<90){
-      await new Promise(r=>setTimeout(r,25));
-      continue;
-    }
-
-    lastDetection=now;
-    const r=await detectLandmarks();
-
-    if(!r){
-      noFaceCount++;
-      if(noFaceCount>=2) msg('Wajah hilang. Kembali ke oval.');
-      await new Promise(r=>setTimeout(r,55));
-      continue;
-    }
-
-    noFaceCount=0;
-    const p=r.landmarks.positions;
-    const e=ear(p);
-    const y=yaw(p);
-
-    if(c==='BLINK'){
-      if(e<closeThreshold){
-        closedFrames++;
-        openFrames=0;
-        progress(Math.max(40,Math.min(65,40+closedFrames*6)));
-      }else if(closedFrames>0 && e>openThreshold){
-        openFrames++;
-        if(openFrames>=1){
-          progress(75);
-          return {
-            passed:true,
-            score:98,
-            challenge:c,
-            baselineEAR:baseEye
-          };
-        }
-      }
-    }else{
-      const delta=y-baseYaw;
-      const threshold=0.045;
-
-      if(c==='TURN_RIGHT' && delta>threshold){
-        progress(75);
-        return {
-          passed:true,
-          score:96,
-          challenge:c,
-          baselineYaw:baseYaw
-        };
-      }
-
-      if(c==='TURN_LEFT' && delta<-threshold){
-        progress(75);
-        return {
-          passed:true,
-          score:96,
-          challenge:c,
-          baselineYaw:baseYaw
-        };
-      }
-    }
-
-    await new Promise(r=>setTimeout(r,50));
-  }
-
-  return {
-    passed:false,
-    score:0,
-    challenge:c,
-    reason:'TIMEOUT'
-  };
-}
-
-function dist(a,b){if(!a||!b||a.length!==128||b.length!==128)return Infinity;let s=0;for(let i=0;i<128;i++){let d=Number(a[i])-Number(b[i]);s+=d*d}return Math.sqrt(s)}
-function score(d,t){return Math.max(0,Math.min(100,100-(d/(Number(t)||.52))*50))}
-async function enroll(){
- const ok=await loadEngine();if(!ok)return fail('AI_ENGINE','Mesin AI gagal dimuat.');
- const live=await liveness();if(!live.passed)return fail('LIVENESS','Liveness gagal. Silakan ulangi.');
- let samples=[];
- for(let i=0;i<5;i++){
-  msg('Ambil sampel wajah '+(i+1)+'/5');progress(40+i*10);
-  let r=await detectDescriptor();
-  if(!r){i--;await new Promise(r=>setTimeout(r,180));continue}
-  samples.push(Array.from(r.descriptor));await new Promise(r=>setTimeout(r,220))
- }
- progress(95);msg('Registrasi wajah selesai.');
- send('ENROLL_RESULT',{nonce:FACE.cfg.nonce,success:true,liveness:true,livenessScore:live.score,samples});
- stopCamera();detail('Hasil dikirim kembali ke aplikasi.');progress(100)
-}
-async function verify(){
-  badge('FACE VERIFY');
-  msg('Mencocokkan wajah...');
-  detail('Jangan bergerak sampai hasil verifikasi dikirim.');
-
-  const r=await detectLandmarks();
-  if(!r){
-    fail('FACE_NO_MATCH','Wajah tidak terdeteksi untuk pencocokan.');
-    return;
-  }
-
-  const emb=embeddingFromLandmarks(r.landmarks);
-  const d=dist(emb,FACE.cfg.profile.embedding);
-  const threshold=FACE.cfg.threshold||.52;
-
-  if(d>threshold){
-    fail('FACE_MISMATCH','Wajah tidak cocok dengan profil guru. Silakan ulangi.');
-    return;
-  }
-
-  const live=await liveness();
-  if(!live || !live.passed){
-    fail('LIVENESS_'+(live && live.reason ? live.reason : 'FAILED'),
-         'Liveness gagal. Silakan ikuti instruksi gerakan wajah.');
-    return;
-  }
-
-  FACE.verificationCompleted=true;
-  badge('VERIFIED');
-  msg('✓ Wajah cocok dan liveness berhasil.');
-  detail('Verifikasi berhasil. Mengirim hasil ke aplikasi...');
-
-  const sent=send('VERIFY_RESULT',{
-    nonce:FACE.cfg.nonce,
-    success:true,
-    faceVerified:true,
-    livenessPassed:true,
-    distance:d,
-    score:Math.max(0,Math.min(1,1-d)),
-    selfieData:makeSelfieData(),
-    diagnosticCode:'VERIFIED'
-  });
-
-  if(!sent){
-    badge('POST_VERIFY_WINDOW');
-    detail('Verifikasi berhasil, tetapi aplikasi utama tidak menerima hasil.');
-    return;
-  }
-
-  await new Promise(r=>setTimeout(r,250));
-  stopCamera();
-  badge('DONE');
-  msg('✓ Verifikasi selesai.');
-  detail('Silakan kembali ke aplikasi absensi.');
-}
-
-
-function fail(reason,text){
-  const code=reason||'UNKNOWN';
-  if(FACE.verificationCompleted){
-    console.warn('Ignored post-verification error:',code,text);
-    return;
-  }
-  msg('❌ '+text);
-  detail('Kode: '+code+' — proses dihentikan. Silakan Coba Lagi.');
-  badge(code);
-  send({
-    source:SOURCE,
-    type:'FACE_ERROR',
-    nonce:FACE.cfg?.nonce,
-    reason:code,
-    message:text,
-    diagnosticCode:code
-  });
-  stopCamera();
-  $('retry').style.display='block';
-}
-
-async function begin(cfg){
-  FACE.cfg=cfg||{};
-  FACE.parentOrigin=cfg.parentOrigin||window.location.origin;
-
-  $('mode').textContent=cfg.mode==='enroll'
-    ? 'Pendaftaran wajah'
-    : 'Verifikasi absensi';
-
-  $('retry').style.display='none';
-
+window.addEventListener('message',async e=>{
+  if(!window.opener || e.source!==window.opener) return;
+  if(!e.data || e.data.source!=='ABSENSI_APP_V32') return;
+  if(e.data.type!=='INIT_CLASS_PHOTO') return;
+  parentOrigin=e.data.parentOrigin||e.origin||'*';
+  document.getElementById('title').textContent=e.data.title||'Foto Kelas';
+  initialized=true;
+  send('CAMERA_READY',{});
   try{
     await openCamera();
-    const ok=await loadEngine();
-
-    if(!ok){
-      fail('AI_ENGINE','Mesin Face Recognition gagal dimuat.');
-      return;
-    }
-
-    if(cfg.mode==='enroll'){
-      await enroll();
-    }else{
-      await verify();
-    }
-
-  }catch(e){
-    console.error('FACE SECURITY ERROR',e);
-
-    let code=e.code||e.name||'CAMERA';
-    let m=e.message||String(e);
-
-    if(e.name==='NotAllowedError'){
-      code='CAMERA_NOT_ALLOWED';
-      m='Browser menolak akses kamera. Pastikan izin Kamera untuk situs Face Security = Izinkan.';
-    }else if(e.name==='NotFoundError'){
-      code='CAMERA_NOT_FOUND';
-      m='Kamera tidak ditemukan pada perangkat.';
-    }else if(e.name==='NotReadableError'){
-      code='CAMERA_NOT_READABLE';
-      m='Kamera sedang digunakan aplikasi lain atau tidak dapat dibaca.';
-    }else if(e.name==='OverconstrainedError'){
-      code='CAMERA_CONSTRAINT';
-      m='Konfigurasi kamera tidak didukung. Mencoba konfigurasi sederhana.';
-    }else if(e.name==='SecurityError'){
-      code='CAMERA_SECURITY';
-      m='Browser memblokir kamera karena konteks keamanan halaman.';
-    }else if(e.code==='VIDEO_NOT_READY'){
-      code='VIDEO_NOT_READY';
-      m=e.message;
-    }
-
-    fail(code,m);
+  }catch(err){
+    let msg='Kamera tidak dapat diakses.';
+    if(err.name==='NotAllowedError') msg='Izin kamera ditolak browser. Izinkan kamera untuk situs ini.';
+    else if(err.name==='NotFoundError') msg='Kamera tidak ditemukan.';
+    else if(err.name==='NotReadableError') msg='Kamera sedang digunakan aplikasi lain.';
+    else if(err.message) msg=err.message;
+    errorEl.style.display='block';errorEl.textContent=msg;
+    statusEl.textContent='Kamera gagal dibuka.';
+    send('PHOTO_ERROR',{message:msg,reason:err.name||'CAMERA'});
   }
-}
-
-window.addEventListener('message',e=>{
- if(!window.opener||e.source!==window.opener)return;
- if(e.data?.source!=='ABSENSI_APP_V32')return;
- if(!FACE.parentOrigin)FACE.parentOrigin=e.origin;
- if(e.data.type==='INIT_FACE')begin(e.data.config||{})
 });
-$('cancel').onclick=()=>{send('CANCEL',{nonce:FACE.cfg?.nonce});stopCamera();window.close()}
-$('retry').onclick=()=>{if(FACE.cfg){$('retry').style.display='none';stopCamera();progress(0);badge('CAMERA');msg('Mencoba kembali...');begin(FACE.cfg)}}
-// Request initialization explicitly after opening.
-setTimeout(()=>send('READY',{}),100);
+document.getElementById('capture').onclick=capture;
+document.getElementById('cancel').onclick=()=>{send('CAMERA_CANCEL',{});stop();window.close()};
+send('CAMERA_READY',{});
 </script>
 </body>
 </html>
