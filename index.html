@@ -298,9 +298,9 @@ window.addEventListener('message',e=>{
  if(!FACE.parentOrigin)FACE.parentOrigin=e.origin;
  if(e.data.type==='INIT_FACE')begin(e.data.config||{})
 });
-$('cancel').onclick=()=>{send('CANCEL',{nonce:FACE.cfg?.nonce});stopCamera();window.close()}
+$('cancel').onclick=()=>{send('CANCEL',{nonce:FACE.cfg?.nonce});stopCamera();if(window.parent!==window){return}else{window.close()}}
 $('retry').onclick=()=>{if(FACE.cfg){$('retry').style.display='none';stopCamera();begin(FACE.cfg)}}
-// Request initialization explicitly after opening.
+// Tell the parent app that the camera page is ready.
 setTimeout(()=>send('READY',{}),100);
 </script>
 </body>
