@@ -40,6 +40,62 @@ function msg(t){$('msg').textContent=t}
 function detail(t){$('detail').textContent=t}
 function badge(t){$('badge').textContent=t}
 function progress(n){$('bar').style.width=Math.max(0,Math.min(100,n))+'%'}
+function getReturnUrl(){
+ try{
+  const p=new URLSearchParams(location.search);
+  const u=p.get('returnUrl')||p.get('return')||'';
+  if(u){
+   try{return decodeURIComponent(u)}catch(e){return u}
+  }
+ }catch(e){}
+ try{
+  const ref=document.referrer||'';
+  if(ref && /(^|\/\/)([^\/]+\.)?blogspot\.com\//i.test(ref))return ref;
+ }catch(e){}
+ return 'https://presensi-monitoringkelas.blogspot.com/?m=0';
+}
+
+let RETURNING=false;
+async function returnToApp(){
+ if(RETURNING)return;
+ RETURNING=true;
+
+ stopCamera();
+ detail('Hasil berhasil dikirim. Mengembalikan ke aplikasi...');
+ badge('SELESAI');
+
+ // Popup normal: biarkan halaman pemanggil menerima postMessage dan menutup kita.
+ try{
+  if(window.opener && !window.opener.closed){
+   try{window.opener.focus()}catch(e){}
+   try{window.close()}catch(e){}
+   await new Promise(r=>setTimeout(r,700));
+   if(window.closed)return;
+  }
+ }catch(e){}
+
+ // Android Custom Tab/WebView: window.close() sering tidak memiliki izin.
+ // Kembali satu halaman terlebih dahulu agar kembali ke aplikasi/pemanggil.
+ try{
+  if(history.length>1){
+   history.back();
+   await new Promise(r=>setTimeout(r,1000));
+   if(document.visibilityState==='hidden')return;
+  }
+ }catch(e){}
+
+ // Fallback terakhir jika history.back() tidak berhasil.
+ try{
+  const target=getReturnUrl();
+  if(target && target!==location.href){
+   location.replace(target);
+   return;
+  }
+ }catch(e){}
+
+ try{location.href='https://presensi-monitoringkelas.blogspot.com/?m=0'}catch(e){}
+}
+
 async function send(type,payload){
  const data=Object.assign({source:'FACE_SECURITY_V32',type:type},payload||{});
  let posted=false;
@@ -261,8 +317,9 @@ async function enroll(){
   samples.push(Array.from(r.descriptor));await new Promise(r=>setTimeout(r,220))
  }
  progress(95);msg('Registrasi wajah selesai.');
- send('ENROLL_RESULT',{nonce:FACE.cfg.nonce,success:true,liveness:true,livenessScore:live.score,samples});
- stopCamera();detail('Hasil dikirim kembali ke aplikasi.');progress(100)
+ const sent=await send('ENROLL_RESULT',{nonce:FACE.cfg.nonce,success:true,liveness:true,livenessScore:live.score,samples});
+ stopCamera();detail('Hasil dikirim kembali ke aplikasi.');progress(100);
+ if(sent&&sent.success)await returnToApp();
 }
 async function verify(){
  const ok=await loadEngine();if(!ok)return fail('AI_ENGINE','Mesin AI gagal dimuat.');
@@ -295,7 +352,7 @@ async function verify(){
  }
 
  progress(90);msg(passed?'✓ Wajah cocok':'✕ Wajah tidak cocok');
- send('VERIFY_RESULT',{
+ const sent=await send('VERIFY_RESULT',{
   nonce:FACE.cfg.nonce,
   success:true,
   faceVerified:passed,
@@ -306,7 +363,8 @@ async function verify(){
   livenessScore:live.score,
   selfieData:selfieData
  });
- stopCamera();progress(100)
+ stopCamera();progress(100);
+ if(sent&&sent.success)await returnToApp();
 }
 function fail(reason,text){msg(text);detail('Proses dihentikan.');send('FACE_ERROR',{nonce:FACE.cfg?.nonce,reason,message:text});$('retry').style.display='block'}
 async function begin(cfg){
@@ -333,7 +391,11 @@ window.addEventListener('message',e=>{
  if(!FACE.parentOrigin)FACE.parentOrigin=e.origin;
  if(e.data.type==='INIT_FACE')begin(e.data.config||{})
 });
-$('cancel').onclick=async()=>{await send('CANCEL',{nonce:FACE.cfg?.nonce});stopCamera();try{window.close()}catch(e){}}
+$('cancel').onclick=async()=>{
+ const sent=await send('CANCEL',{nonce:FACE.cfg?.nonce});
+ if(sent&&sent.success)await returnToApp();
+ else await returnToApp();
+}
 $('retry').onclick=()=>{if(FACE.cfg){$('retry').style.display='none';FACE.started=false;stopCamera();begin(FACE.cfg)}}
 
 // Normal browser: parent sends INIT_FACE through postMessage.
