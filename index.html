@@ -108,16 +108,41 @@ function stopCamera(){
 // Untuk liveness kita TIDAK menghitung descriptor setiap frame.
 // Descriptor hanya dihitung setelah liveness lolos. Ini membuat deteksi
 // kedip/toleh jauh lebih ringan dan responsif.
+const FAST_DETECTOR = new faceapi.TinyFaceDetectorOptions({inputSize:160,scoreThreshold:.30});
+const ACCURATE_DETECTOR = new faceapi.TinyFaceDetectorOptions({inputSize:224,scoreThreshold:.30});
+
 async function detectLandmarks(){
- return await faceapi
-  .detectSingleFace($('video'),new faceapi.TinyFaceDetectorOptions({inputSize:224,scoreThreshold:.40}))
-  .withFaceLandmarks(true)
+ try{
+  return await faceapi
+   .detectSingleFace($('video'),FAST_DETECTOR)
+   .withFaceLandmarks(true);
+ }catch(e){
+  return null;
+ }
 }
+
 async function detectDescriptor(){
- return await faceapi
-  .detectSingleFace($('video'),new faceapi.TinyFaceDetectorOptions({inputSize:224,scoreThreshold:.40}))
-  .withFaceLandmarks(true)
-  .withFaceDescriptor()
+ try{
+  return await faceapi
+   .detectSingleFace($('video'),ACCURATE_DETECTOR)
+   .withFaceLandmarks(true)
+   .withFaceDescriptor();
+ }catch(e){
+  return null;
+ }
+}
+
+async function detectDescriptorRobust(maxTries=6){
+ let best=null;
+ for(let i=0;i<maxTries;i++){
+  const r=await detectDescriptor();
+  if(r && r.descriptor){
+   if(!best || (r.detection?.score||0)>(best.detection?.score||0))best=r;
+   if((r.detection?.score||0)>=.58)return r;
+  }
+  await new Promise(r=>setTimeout(r,55));
+ }
+ return best;
 }
 function ear(p){
  function r(i){let a=p[i[0]],b=p[i[1]],c=p[i[2]],d=p[i[3]],e=p[i[4]],f=p[i[5]];let x=Math.hypot(b.x-f.x,b.y-f.y),y=Math.hypot(c.x-e.x,c.y-e.y),z=Math.hypot(a.x-d.x,a.y-d.y);return z?(x+y)/(2*z):0}
@@ -144,14 +169,14 @@ async function liveness(){
  progress(5);
 
  const started=Date.now();
- const maxMs=9000;
+ const maxMs=11000;
 
  // Kalibrasi singkat: cukup 3 frame wajah yang stabil.
  let yawSamples=[];
  let eyeSamples=[];
  let attempts=0;
 
- while(Date.now()-started<1800 && (yawSamples.length<3 || eyeSamples.length<3)){
+ while(Date.now()-started<2600 && (yawSamples.length<3 || eyeSamples.length<3)){
   attempts++;
   const r=await detectLandmarks();
 
@@ -242,7 +267,7 @@ async function liveness(){
    const delta=y-baseYaw;
 
    // Sedikit lebih toleran terhadap variasi kamera dan wajah.
-   const threshold=0.055;
+   const threshold=0.050;
 
    if(c==='TURN_RIGHT' && delta>threshold){
     progress(70);
@@ -269,8 +294,8 @@ async function enroll(){
  let samples=[];
  for(let i=0;i<5;i++){
   msg('Ambil sampel wajah '+(i+1)+'/5');progress(40+i*10);
-  let r=await detectDescriptor();
-  if(!r){i--;await new Promise(r=>setTimeout(r,180));continue}
+  let r=await detectDescriptorRobust(6);
+  if(!r){i--;await new Promise(r=>setTimeout(r,120));continue}
   samples.push(Array.from(r.descriptor));await new Promise(r=>setTimeout(r,220))
  }
  progress(95);msg('Registrasi wajah selesai.');
@@ -281,8 +306,21 @@ async function verify(){
  const ok=await loadEngine();if(!ok)return fail('AI_ENGINE','Mesin AI gagal dimuat.');
  const live=await liveness();if(!live.passed)return fail('LIVENESS','Liveness gagal.');
  msg('Mencocokkan wajah...');progress(55);
- const r=await detectDescriptor();if(!r)return fail('NO_FACE','Wajah tidak terdeteksi.');
- const d=dist(Array.from(r.descriptor),FACE.cfg.descriptor),s=score(d,FACE.cfg.threshold);
+ const target=FACE.cfg.descriptor;
+ if(!Array.isArray(target)||target.length!==128)return fail('PROFILE','Profil wajah tidak valid.');
+
+ let best=null;
+ for(let i=0;i<6;i++){
+  const r=await detectDescriptorRobust(2);
+  if(r && r.descriptor){
+   const d0=dist(Array.from(r.descriptor),target);
+   if(!best || d0<best.d)best={r:r,d:d0};
+  }
+  await new Promise(r=>setTimeout(r,70));
+ }
+
+ if(!best)return fail('NO_FACE','Wajah tidak terdeteksi.');
+ const d=best.d,s=score(d,FACE.cfg.threshold);
  const passed=d<=(FACE.cfg.threshold||.52);
 
  // Ambil foto bukti dari frame kamera setelah liveness + face match.
@@ -314,6 +352,7 @@ async function verify(){
   faceVerified:passed,
   faceScore:Math.round(s*10)/10,
   distance:Math.round(d*1000)/1000,
+  detectionScore:best && best.r && best.r.detection ? best.r.detection.score : 0,
   threshold:FACE.cfg.threshold||.52,
   liveness:true,
   livenessScore:live.score,
