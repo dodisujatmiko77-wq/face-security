@@ -40,9 +40,32 @@ function msg(t){$('msg').textContent=t}
 function detail(t){$('detail').textContent=t}
 function badge(t){$('badge').textContent=t}
 function progress(n){$('bar').style.width=Math.max(0,Math.min(100,n))+'%'}
-function send(type,payload){
- if(!window.opener) return;
- window.opener.postMessage({source:'FACE_SECURITY_V32',type,...payload},FACE.parentOrigin||'*');
+async function send(type,payload){
+ const data=Object.assign({source:'FACE_SECURITY_V32',type:type},payload||{});
+ let posted=false;
+ if(window.opener){
+  try{window.opener.postMessage(data,FACE.parentOrigin||'*');posted=true}catch(e){console.warn('postMessage gagal',e)}
+ }
+ // For final results, also write to the server. This makes the APK path work
+ // even when WebView exposes window.opener but drops postMessage events.
+ const finalTypes=['ENROLL_RESULT','VERIFY_RESULT','FACE_ERROR','CANCEL'];
+ if(FACE.cfg?.nonce && finalTypes.indexOf(type)>=0){
+  try{
+   const res=await fetch('https://script.google.com/macros/s/AKfycbxBtkDGkgzK1FdjUDEI0CbtDWwgb5RTrG4wl5v6VSyvudVrFLK9J-zfRN5zB5J4BNcw/exec',{
+    method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify({fn:'submitFaceSecurityResult',args:[FACE.cfg.nonce,data]})
+   });
+   const json=await res.json();
+   if(!json?.success && !posted) throw new Error(json?.message||'Hasil kamera gagal dikirim.');
+   return {success:true,via:posted?'postMessage+server':'server'};
+  }catch(e){
+   console.error('FACE RESULT SEND ERROR',e);
+   if(posted)return {success:true,via:'postMessage'};
+   return {success:false,message:e.message||String(e)};
+  }
+ }
+ if(posted)return {success:true,via:'postMessage'};
+ if(FACE.cfg?.nonce)return {success:false,message:'Tidak ada kanal komunikasi ke aplikasi.'};
+ return {success:false,message:'Konfigurasi kamera belum tersedia.'};
 }
 async function models(base){
  await Promise.all([
@@ -287,21 +310,40 @@ async function verify(){
 }
 function fail(reason,text){msg(text);detail('Proses dihentikan.');send('FACE_ERROR',{nonce:FACE.cfg?.nonce,reason,message:text});$('retry').style.display='block'}
 async function begin(cfg){
+ if(FACE.started)return;
+ FACE.started=true;
  FACE.cfg=cfg||{};FACE.parentOrigin=cfg.parentOrigin||window.location.origin;
  $('mode').textContent=cfg.mode==='enroll'?'Pendaftaran wajah':'Verifikasi absensi';
  try{await openCamera();msg('Kamera aktif.');detail('Menyiapkan AI dan kalibrasi wajah...');if(cfg.mode==='enroll')await enroll();else await verify()}
  catch(e){console.error(e);let m=e.name==='NotAllowedError'?'Izin kamera diblokir oleh browser/host.':e.name==='NotFoundError'?'Kamera tidak ditemukan.':e.name==='NotReadableError'?'Kamera sedang dipakai aplikasi lain.':(e.message||String(e));fail('CAMERA',m)}
 }
+function readFallbackConfig(){
+ const p=new URLSearchParams(location.search);
+ const nonce=p.get('nonce')||'';
+ const mode=p.get('mode')||'';
+ if(!nonce||!mode)return null;
+ let descriptor=null;
+ try{descriptor=p.get('descriptor')?JSON.parse(p.get('descriptor')):null}catch(e){descriptor=null}
+ return {mode:mode,nonce:nonce,descriptor:descriptor,threshold:Number(p.get('threshold')||.52)};
+}
+
 window.addEventListener('message',e=>{
  if(!window.opener||e.source!==window.opener)return;
  if(e.data?.source!=='ABSENSI_APP_V32')return;
  if(!FACE.parentOrigin)FACE.parentOrigin=e.origin;
  if(e.data.type==='INIT_FACE')begin(e.data.config||{})
 });
-$('cancel').onclick=()=>{send('CANCEL',{nonce:FACE.cfg?.nonce});stopCamera();window.close()}
-$('retry').onclick=()=>{if(FACE.cfg){$('retry').style.display='none';stopCamera();begin(FACE.cfg)}}
-// Request initialization explicitly after opening.
-setTimeout(()=>send('READY',{}),100);
+$('cancel').onclick=async()=>{await send('CANCEL',{nonce:FACE.cfg?.nonce});stopCamera();try{window.close()}catch(e){}}
+$('retry').onclick=()=>{if(FACE.cfg){$('retry').style.display='none';FACE.started=false;stopCamera();begin(FACE.cfg)}}
+
+// Normal browser: parent sends INIT_FACE through postMessage.
+// Android WebView/APK: query config starts the camera automatically and the result
+// is returned through Apps Script, so window.opener is not required.
+const fallbackConfig=readFallbackConfig();
+if(fallbackConfig){
+ setTimeout(()=>{if(!FACE.started)begin(fallbackConfig)},450);
+}
+setTimeout(()=>{if(window.opener)send('READY',{});},100);
 </script>
 </body>
 </html>
